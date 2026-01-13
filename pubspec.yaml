@@ -1,0 +1,56 @@
+name: ghostmusic
+description: "Ghost Music - Apple Music style player with Poweramp functionality"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.7.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State Management
+  flutter_riverpod: ^2.6.1
+
+  # Audio
+  just_audio: ^0.10.5
+  audio_session: ^0.2.2
+
+  # File System & Paths
+  path: ^1.9.1
+  path_provider: ^2.1.5
+  file_picker: ^8.3.7
+
+  # Image & Colors
+  palette_generator: ^0.3.3+4
+
+  # UI Helpers
+  gap: ^3.0.1
+
+  # Storage
+  shared_preferences: ^2.5.3
+
+  # Utils
+  collection: ^1.19.1
+
+  # Metadata (ID3 parsing implemented in-app)
+
+  # Network (cover art lookup)
+  http: ^1.2.2
+
+  # Desktop backend (Windows)
+  just_audio_windows: ^0.2.2
+
+  # Extra codecs on Windows (FLAC/OGG etc)
+  media_kit: ^1.2.6
+  media_kit_libs_windows_audio: ^1.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
