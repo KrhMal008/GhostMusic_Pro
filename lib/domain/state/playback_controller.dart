@@ -478,7 +478,20 @@ class PlaybackController extends StateNotifier<PlaybackState> {
   Future<void> _initAudio() async {
     try {
       final session = await AudioSession.instance;
+      // Use standard music configuration - works reliably on iOS
       await session.configure(const AudioSessionConfiguration.music());
+      
+      // Listen to interruptions to handle phone calls, etc.
+      session.interruptionEventStream.listen((event) {
+        if (event.begin) {
+          // Interruption started (e.g., phone call)
+          if (state.isPlaying) {
+            unawaited(_enqueue(() async {
+              await _activeDeck.pause();
+            }));
+          }
+        }
+      });
     } catch (e) {
       debugPrint('AudioSession init failed: $e');
     }
@@ -488,8 +501,8 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     try {
       final session = await AudioSession.instance;
       await session.setActive(true);
-    } catch (_) {
-      // ignore
+    } catch (e) {
+      debugPrint('AudioSession activate failed: $e');
     }
   }
 
@@ -1132,18 +1145,21 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     _lastEqOutHz = -1;
     _lastEqInHz = -1;
 
+    // Use timeout to prevent hanging on iOS when player is in bad state
+    const timeout = Duration(milliseconds: 500);
+
     try {
-      await _activeDeck.setVolume(1.0);
-      await _activeDeck.setHighPassHz(null);
-      await _activeDeck.setRate(1.0);
+      await _activeDeck.setVolume(1.0).timeout(timeout, onTimeout: () {});
+      await _activeDeck.setHighPassHz(null).timeout(timeout, onTimeout: () {});
+      await _activeDeck.setRate(1.0).timeout(timeout, onTimeout: () {});
     } catch (_) {}
 
     try {
-      await _inactiveDeck.setHighPassHz(null);
-      await _inactiveDeck.setRate(1.0);
-      await _inactiveDeck.setVolume(1.0);
-      await _inactiveDeck.pause();
-      await _inactiveDeck.seek(Duration.zero);
+      await _inactiveDeck.setHighPassHz(null).timeout(timeout, onTimeout: () {});
+      await _inactiveDeck.setRate(1.0).timeout(timeout, onTimeout: () {});
+      await _inactiveDeck.setVolume(1.0).timeout(timeout, onTimeout: () {});
+      await _inactiveDeck.pause().timeout(timeout, onTimeout: () {});
+      await _inactiveDeck.seek(Duration.zero).timeout(timeout, onTimeout: () {});
     } catch (_) {}
 
     if (state.mixPhase != MixPhase.off || state.mixProgress01 != 0.0) {
@@ -2068,26 +2084,41 @@ class _PlaybackDeck {
   }
 
   Future<void> play() async {
-    if (_useMediaKit) {
-      await _mkPlayer?.play();
-    } else {
-      await _player.play();
+    const timeout = Duration(seconds: 2);
+    try {
+      if (_useMediaKit) {
+        await _mkPlayer?.play().timeout(timeout, onTimeout: () {});
+      } else {
+        await _player.play().timeout(timeout, onTimeout: () {});
+      }
+    } catch (e) {
+      debugPrint('Deck play failed: $e');
     }
   }
 
   Future<void> pause() async {
-    if (_useMediaKit) {
-      await _mkPlayer?.pause();
-    } else {
-      await _player.pause();
+    const timeout = Duration(seconds: 1);
+    try {
+      if (_useMediaKit) {
+        await _mkPlayer?.pause().timeout(timeout, onTimeout: () {});
+      } else {
+        await _player.pause().timeout(timeout, onTimeout: () {});
+      }
+    } catch (e) {
+      debugPrint('Deck pause failed: $e');
     }
   }
 
   Future<void> seek(Duration position) async {
-    if (_useMediaKit) {
-      await _mkPlayer?.seek(position);
-    } else {
-      await _player.seek(position);
+    const timeout = Duration(seconds: 2);
+    try {
+      if (_useMediaKit) {
+        await _mkPlayer?.seek(position).timeout(timeout, onTimeout: () {});
+      } else {
+        await _player.seek(position).timeout(timeout, onTimeout: () {});
+      }
+    } catch (e) {
+      debugPrint('Deck seek failed: $e');
     }
   }
 

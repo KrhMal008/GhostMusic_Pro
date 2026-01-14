@@ -42,9 +42,8 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
   late final AnimationController _artworkAnimController;
   late final Animation<double> _artworkScaleAnimation;
 
-  // Scroll controller for content - enables swipe-to-dismiss from artwork area
+  // Scroll controller for content - enables overscroll-to-dismiss from artwork area
   final ScrollController _contentScrollController = ScrollController();
-  bool _contentDismissActive = false; // true when drag-to-dismiss is armed on content
 
   @override
   void initState() {
@@ -127,35 +126,52 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     _dismissAnimController.forward(from: 0.0);
   }
 
-  // Content area drag-to-dismiss: activates when scroll is at top
-  void _onContentDragStart(DragStartDetails details) {
-    // Arm dismiss if scroll is at top (works on all platforms)
-    final atTop = !_contentScrollController.hasClients ||
-        _contentScrollController.offset <= 0.0;
-    _contentDismissActive = atTop;
-    if (_contentDismissActive) {
-      setState(() {}); // Trigger rebuild to disable scroll physics
+  // Handle overscroll at top to trigger dismiss (works on iOS + Windows)
+  bool _onScrollNotification(ScrollNotification notification) {
+    // Detect overscroll at top (user pulling down when already at top)
+    if (notification is OverscrollNotification) {
+      if (notification.overscroll < 0) {
+        // Pulling down at top - accumulate for dismiss
+        final delta = -notification.overscroll;
+        if (_dismissAnimController.isAnimating) {
+          _dismissAnimController.stop();
+        }
+        final maxDrag = MediaQuery.of(context).size.height * 0.75;
+        setState(() {
+          _dragOffset = (_dragOffset + delta).clamp(0.0, maxDrag);
+        });
+      }
     }
+    // Detect scroll end to finalize dismiss decision
+    if (notification is ScrollEndNotification) {
+      if (_dragOffset > 0) {
+        _finalizeDismiss(Velocity.zero);
+      }
+    }
+    return false; // Don't absorb - let scroll view handle normally
   }
 
-  void _onContentDragUpdate(DragUpdateDetails details) {
-    if (!_contentDismissActive) return;
-    // If user drags up, disarm and let scroll take over
-    if (details.delta.dy < -2) {
-      _contentDismissActive = false;
-      setState(() {}); // Re-enable scroll physics
+  void _finalizeDismiss(Velocity velocity) {
+    const dismissThreshold = 100.0;
+    const dismissVelocity = 500.0;
+
+    final vy = velocity.pixelsPerSecond.dy;
+    final shouldDismiss = _dragOffset > dismissThreshold || vy > dismissVelocity;
+
+    if (shouldDismiss) {
+      HapticFeedback.lightImpact();
+      Navigator.of(context).pop();
       return;
     }
-    // Forward to standard dismiss handler
-    _onVerticalDragUpdate(details);
-  }
 
-  void _onContentDragEnd(DragEndDetails details) {
-    final wasActive = _contentDismissActive;
-    _contentDismissActive = false;
-    setState(() {}); // Re-enable scroll physics
-    if (!wasActive) return;
-    _onVerticalDragEnd(details);
+    // Smooth snap-back to 0
+    _dragOffsetAnim = Tween<double>(begin: _dragOffset, end: 0.0).animate(
+      CurvedAnimation(
+        parent: _dismissAnimController,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    _dismissAnimController.forward(from: 0.0);
   }
 
   void _openQueue() {
@@ -520,15 +536,12 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                       onOpenMore: track == null ? null : () => _openMore(track.filePath),
                     ),
                   ),
-                  // Main content area - wrapped with gesture detector for swipe-to-dismiss on iOS
+                  // Main content area - NotificationListener for overscroll-to-dismiss
                   Expanded(
                     child: track == null
                         ? _EmptyState()
-                        : GestureDetector(
-                            behavior: HitTestBehavior.translucent,
-                            onVerticalDragStart: _onContentDragStart,
-                            onVerticalDragUpdate: _onContentDragUpdate,
-                            onVerticalDragEnd: _onContentDragEnd,
+                        : NotificationListener<ScrollNotification>(
+                            onNotification: _onScrollNotification,
                             child: _PlayerContent(
                               state: state,
                               artworkPath: artworkPath,
@@ -536,7 +549,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                               isDraggingSeek: _isDraggingSeek,
                               dragSeekValue: _dragSeekValue,
                               scrollController: _contentScrollController,
-                              dismissDragActive: _contentDismissActive,
                               onSeekStart: (value) {
                                 setState(() {
                                   _isDraggingSeek = true;
@@ -752,7 +764,6 @@ class _PlayerContent extends StatelessWidget {
   final VoidCallback? onOpenEqualizer;
   final VoidCallback? onOpenMore;
   final ScrollController? scrollController;
-  final bool dismissDragActive;
 
   const _PlayerContent({
     required this.state,
@@ -768,7 +779,6 @@ class _PlayerContent extends StatelessWidget {
     required this.onPrevious,
     required this.onShuffle,
     required this.onRepeat,
-    this.dismissDragActive = false,
     this.onOpenQueue,
     this.onOpenEqualizer,
     this.onOpenMore,
@@ -792,11 +802,8 @@ class _PlayerContent extends StatelessWidget {
         constraints: const BoxConstraints(maxWidth: 520),
         child: SingleChildScrollView(
           controller: scrollController,
-          // When dismiss drag is active, disable scrolling so gesture goes to dismiss handler
-          // Otherwise: ClampingScrollPhysics on iOS, BouncingScrollPhysics elsewhere
-          physics: dismissDragActive 
-              ? const NeverScrollableScrollPhysics() 
-              : (Platform.isIOS ? const ClampingScrollPhysics() : const BouncingScrollPhysics()),
+          // Use BouncingScrollPhysics to generate OverscrollNotification for pull-to-dismiss
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
           child: Column(
             children: [
