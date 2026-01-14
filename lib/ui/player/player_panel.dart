@@ -8,7 +8,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
-
 import 'package:ghostmusic/domain/state/library_controller.dart';
 import 'package:ghostmusic/domain/state/playback_controller.dart';
 import 'package:ghostmusic/domain/state/playback_state.dart';
@@ -31,16 +30,26 @@ class PlayerPanel extends ConsumerStatefulWidget {
 }
 
 class _PlayerPanelState extends ConsumerState<PlayerPanel>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   bool _isDraggingSeek = false;
   double _dragSeekValue = 0.0;
+
+  // Drag-to-dismiss (smooth)
+  double _dragOffset = 0.0;
+  late final AnimationController _dismissAnimController;
+  late Animation<double> _dragOffsetAnim;
 
   late final AnimationController _artworkAnimController;
   late final Animation<double> _artworkScaleAnimation;
 
+  // Scroll controller for content - enables swipe-to-dismiss from artwork area
+  final ScrollController _contentScrollController = ScrollController();
+  bool _contentDismissActive = false; // true when drag-to-dismiss is armed on content
+
   @override
   void initState() {
     super.initState();
+
     _artworkAnimController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
@@ -52,17 +61,99 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
       ),
     );
     _artworkAnimController.forward();
+
+    _dismissAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 260),
+    );
+
+    _dragOffsetAnim = AlwaysStoppedAnimation(_dragOffset);
+    _dismissAnimController.addListener(() {
+      if (!mounted) return;
+      setState(() {
+        _dragOffset = _dragOffsetAnim.value;
+      });
+    });
   }
 
   @override
   void dispose() {
     _artworkAnimController.dispose();
+    _dismissAnimController.dispose();
+    _contentScrollController.dispose();
     super.dispose();
   }
 
   void _close() {
     HapticFeedback.lightImpact();
     Navigator.of(context).maybePop();
+  }
+
+  // Drag should be only on header to avoid conflicts with scroll/slider
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    // Only downward drag
+    if (details.delta.dy <= 0) return;
+
+    if (_dismissAnimController.isAnimating) {
+      _dismissAnimController.stop();
+    }
+
+    final maxDrag = MediaQuery.of(context).size.height * 0.75; // no endless drag
+    setState(() {
+      _dragOffset = (_dragOffset + details.delta.dy).clamp(0.0, maxDrag);
+    });
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) {
+    const dismissThreshold = 120.0;
+    const dismissVelocity = 900.0;
+
+    final vy = details.velocity.pixelsPerSecond.dy;
+    final shouldDismiss = _dragOffset > dismissThreshold || vy > dismissVelocity;
+
+    if (shouldDismiss) {
+      HapticFeedback.lightImpact();
+      Navigator.of(context).pop();
+      return;
+    }
+
+    // Smooth snap-back to 0
+    _dragOffsetAnim = Tween<double>(begin: _dragOffset, end: 0.0).animate(
+      CurvedAnimation(
+        parent: _dismissAnimController,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    _dismissAnimController.forward(from: 0.0);
+  }
+
+  // Content area drag-to-dismiss: only activates when scroll is at top (iOS)
+  void _onContentDragStart(DragStartDetails details) {
+    if (!Platform.isIOS) return;
+    // Arm dismiss if scroll is at top
+    final atTop = !_contentScrollController.hasClients ||
+        _contentScrollController.offset <= 0.0;
+    _contentDismissActive = atTop;
+  }
+
+  void _onContentDragUpdate(DragUpdateDetails details) {
+    if (!_contentDismissActive) return;
+    // If user drags up, disarm and let scroll take over
+    if (details.delta.dy < -2) {
+      _contentDismissActive = false;
+      return;
+    }
+    // Forward to standard dismiss handler
+    _onVerticalDragUpdate(details);
+  }
+
+  void _onContentDragEnd(DragEndDetails details) {
+    if (!_contentDismissActive) {
+      _contentDismissActive = false;
+      return;
+    }
+    _contentDismissActive = false;
+    _onVerticalDragEnd(details);
   }
 
   void _openQueue() {
@@ -151,7 +242,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                     subtitle: const Text('Очистить кэш и попробовать снова'),
                     onTap: () async {
                       Navigator.of(ctx).pop();
-                      // Force refresh: clear cached net cover for this album and retry.
                       try {
                         await CoverArtService.clearNetCacheForFile(trackPath);
                         await CoverArtService.getOrFetchForFile(trackPath);
@@ -172,7 +262,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
         );
       },
     );
-
   }
 
   void _openMoveCopy(String trackPath) {
@@ -236,7 +325,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
 
       if (newPath == null) return;
 
-      // If we moved the currently playing track, refresh the queue so playback can continue.
       if (move && playback.currentTrack?.filePath == trackPath) {
         final wasPlaying = playback.isPlaying;
         final pos = playback.position;
@@ -257,7 +345,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
         }
       }
 
-      // Rescan library in the background.
       ref.read(libraryControllerProvider.notifier).rescan();
 
       messenger.showSnackBar(
@@ -364,7 +451,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
       return outPath;
     }
 
-    // Move: prefer rename; fall back to copy+delete across volumes.
     try {
       await src.rename(outPath);
       return outPath;
@@ -378,7 +464,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
   }
 
   @override
-
   Widget build(BuildContext context) {
     final state = ref.watch(playbackControllerProvider);
     final ctrl = ref.read(playbackControllerProvider.notifier);
@@ -388,77 +473,126 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
         ? ref.watch(trackArtworkPathProvider(track.filePath))
         : const AsyncValue<String?>.data(null);
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-       body: Stack(
-         children: [
-           const Positioned.fill(child: ColoredBox(color: Colors.black)),
-           Positioned.fill(
-            child: ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-              child: _AnimatedBackground(artworkAsync: artworkPath),
+    final mediaQuery = MediaQuery.of(context);
+    final topPadding = mediaQuery.padding.top;
+    final bottomPadding = mediaQuery.padding.bottom;
+
+    return AnimatedBuilder(
+      animation: _dismissAnimController,
+      builder: (context, child) {
+        // Animate the whole panel down when dragging
+        return Transform.translate(
+          offset: Offset(0, _dragOffset),
+          child: child,
+        );
+      },
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: Stack(
+          children: [
+            // Background layers
+            const Positioned.fill(child: ColoredBox(color: Colors.black)),
+            Positioned.fill(
+              child: ImageFiltered(
+                imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+                child: _AnimatedBackground(artworkAsync: artworkPath),
+              ),
             ),
-          ),
-
-          Positioned.fill(
-            child: Container(color: Colors.black.withValues(alpha: 0.74)),
-          ),
-
-
-
-          SafeArea(
-            bottom: false,
-            child: Column(
-              children: [
-                 _Header(
-                   onClose: _close,
-                   onOpenQueue: state.hasQueue ? _openQueue : null,
-                   onOpenMore: track == null ? null : () => _openMore(track.filePath),
-                 ),
-
-                Expanded(
-                  child: track == null
-                      ? _EmptyState()
-                      : _PlayerContent(
-                            state: state,
-                            artworkPath: artworkPath,
-                            artworkAnimation: _artworkScaleAnimation,
-                            isDraggingSeek: _isDraggingSeek,
-                            dragSeekValue: _dragSeekValue,
-                            onSeekStart: (value) {
-                              setState(() {
-                                _isDraggingSeek = true;
-                                _dragSeekValue = value;
-                              });
-                            },
-                            onSeekUpdate: (value) {
-                              setState(() => _dragSeekValue = value);
-                            },
-                            onSeekEnd: (value) async {
-                              final duration = state.duration;
-                              if (duration != null) {
-                                final seekMs = (duration.inMilliseconds * value).round();
-                                await ctrl.seek(Duration(milliseconds: seekMs));
-                              }
-                              if (mounted) {
-                                setState(() => _isDraggingSeek = false);
-                              }
-                            },
-                            onPlayPause: () => ctrl.togglePlayPause(),
-                            onNext: () => ctrl.next(),
-                            onPrevious: () => ctrl.previous(),
+            Positioned.fill(
+              child: Container(color: Colors.black.withValues(alpha: 0.74)),
+            ),
+            // Main content with proper safe area handling
+            Positioned.fill(
+              child: Column(
+                children: [
+                  // Top safe area spacer
+                  SizedBox(height: topPadding),
+                  // Header with drag gesture (Apple Music style dismiss)
+                  GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onVerticalDragUpdate: _onVerticalDragUpdate,
+                    onVerticalDragEnd: _onVerticalDragEnd,
+                    child: _Header(
+                      onClose: _close,
+                      onOpenQueue: state.hasQueue ? _openQueue : null,
+                      onOpenMore: track == null ? null : () => _openMore(track.filePath),
+                    ),
+                  ),
+                  // Main content area - wrapped with gesture detector for swipe-to-dismiss on iOS
+                  Expanded(
+                    child: track == null
+                        ? _EmptyState()
+                        : GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onVerticalDragStart: _onContentDragStart,
+                            onVerticalDragUpdate: _onContentDragUpdate,
+                            onVerticalDragEnd: _onContentDragEnd,
+                            child: _PlayerContent(
+                              state: state,
+                              artworkPath: artworkPath,
+                              artworkAnimation: _artworkScaleAnimation,
+                              isDraggingSeek: _isDraggingSeek,
+                              dragSeekValue: _dragSeekValue,
+                              scrollController: _contentScrollController,
+                              onSeekStart: (value) {
+                                setState(() {
+                                  _isDraggingSeek = true;
+                                  _dragSeekValue = value;
+                                });
+                              },
+                              onSeekUpdate: (value) {
+                                setState(() => _dragSeekValue = value);
+                              },
+                              onSeekEnd: (value) async {
+                                final duration = state.duration;
+                                if (duration != null) {
+                                  final seekMs = (duration.inMilliseconds * value).round();
+                                  await ctrl.seek(Duration(milliseconds: seekMs));
+                                }
+                                if (mounted) {
+                                  setState(() => _isDraggingSeek = false);
+                                }
+                              },
+                              onPlayPause: () => ctrl.togglePlayPause(),
+                              onNext: () => ctrl.next(),
+                              onPrevious: () => ctrl.previous(),
+                              onShuffle: () => ctrl.toggleShuffle(),
+                              onRepeat: () => ctrl.toggleRepeat(),
+                              onOpenQueue: state.hasQueue ? _openQueue : null,
+                              onOpenEqualizer: _openEqualizer,
+                              onOpenMore: () => _openMore(track.filePath),
+                            ),
+                          ),
+                  ),
+                  // Secondary controls pinned at bottom
+                  if (track != null)
+                    Padding(
+                      padding: EdgeInsets.only(
+                        left: 20,
+                        right: 20,
+                        bottom: bottomPadding + 16,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _SecondaryControls(
+                            shuffleEnabled: state.shuffleEnabled,
+                            repeatMode: state.repeatMode,
                             onShuffle: () => ctrl.toggleShuffle(),
                             onRepeat: () => ctrl.toggleRepeat(),
                             onOpenQueue: state.hasQueue ? _openQueue : null,
                             onOpenEqualizer: _openEqualizer,
-                            onOpenMore: () => _openMore(track.filePath),
                           ),
-
-                ),
-              ],
+                          const SizedBox(height: 16),
+                          _TechInfo(trackPath: track.filePath),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -525,15 +659,16 @@ class _Header extends StatelessWidget {
 
     return Column(
       children: [
-        const SizedBox(height: 6),
+        // Extra breathing room below Dynamic Island / notch (Apple Music style)
+        const SizedBox(height: 10),
         const GlassHandle(),
         Padding(
-          padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+          padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
           child: Row(
             children: [
               IconButton(
                 onPressed: onClose,
-                icon: Icon(Icons.keyboard_arrow_down_rounded, size: 32),
+                icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32),
                 color: cs.onSurface,
                 tooltip: 'Close',
               ),
@@ -541,13 +676,13 @@ class _Header extends StatelessWidget {
               if (onOpenQueue != null)
                 IconButton(
                   onPressed: onOpenQueue,
-                  icon: Icon(Icons.queue_music_rounded, size: 26),
+                  icon: const Icon(Icons.queue_music_rounded, size: 26),
                   color: cs.onSurface.withValues(alpha: 0.85),
                   tooltip: 'Queue',
                 ),
               IconButton(
                 onPressed: onOpenMore,
-                icon: Icon(Icons.more_horiz_rounded, size: 26),
+                icon: const Icon(Icons.more_horiz_rounded, size: 26),
                 color: cs.onSurface.withValues(alpha: 0.85),
                 tooltip: 'Ещё',
               ),
@@ -613,6 +748,7 @@ class _PlayerContent extends StatelessWidget {
   final VoidCallback? onOpenQueue;
   final VoidCallback? onOpenEqualizer;
   final VoidCallback? onOpenMore;
+  final ScrollController? scrollController;
 
   const _PlayerContent({
     required this.state,
@@ -631,6 +767,7 @@ class _PlayerContent extends StatelessWidget {
     this.onOpenQueue,
     this.onOpenEqualizer,
     this.onOpenMore,
+    this.scrollController,
   });
 
   @override
@@ -648,80 +785,63 @@ class _PlayerContent extends StatelessWidget {
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 520),
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
-          children: [
-            ScaleTransition(
-              scale: artworkAnimation,
-              child: _ArtworkContainer(trackPath: track.filePath),
-            ),
-
-            const SizedBox(height: 18),
-
-            if (queuePosition != null) ...[
-              Center(
-                child: Text(
-                  queuePosition,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: cs.onSurface.withValues(alpha: 0.55),
-                    letterSpacing: 0.8,
+        child: SingleChildScrollView(
+          controller: scrollController,
+          // iOS: ClampingScrollPhysics prevents bounce/overscroll that conflicts with dismiss gesture
+          // Other platforms: keep BouncingScrollPhysics for native feel
+          physics: Platform.isIOS ? const ClampingScrollPhysics() : const BouncingScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+          child: Column(
+            children: [
+              ScaleTransition(
+                scale: artworkAnimation,
+                child: _ArtworkContainer(trackPath: track.filePath),
+              ),
+              const SizedBox(height: 18),
+              if (queuePosition != null) ...[
+                Center(
+                  child: Text(
+                    queuePosition,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: cs.onSurface.withValues(alpha: 0.55),
+                      letterSpacing: 0.8,
+                    ),
                   ),
                 ),
+                const SizedBox(height: 12),
+              ],
+              _TrackDetails(
+                title: track.displayTitle,
+                artist: track.artist,
+                album: track.album,
+                onMore: onOpenMore,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 14),
+              _SeekBar(
+                value: seekValue,
+                position: state.position,
+                duration: state.duration,
+                isDragging: isDraggingSeek,
+                onChangeStart: onSeekStart,
+                onChanged: onSeekUpdate,
+                onChangeEnd: onSeekEnd,
+              ),
+              _GhostMixingIndicator(
+                phase: state.mixPhase,
+                progress01: state.mixProgress01,
+              ),
+              const SizedBox(height: 20),
+              _PlaybackControls(
+                isPlaying: state.isPlaying,
+                onPlayPause: onPlayPause,
+                onNext: onNext,
+                onPrevious: onPrevious,
+              ),
+              const SizedBox(height: 18),
             ],
-
-            _TrackDetails(
-              title: track.displayTitle,
-              artist: track.artist,
-              album: track.album,
-              onMore: onOpenMore,
-            ),
-
-            const SizedBox(height: 14),
-
-            _SeekBar(
-              value: seekValue,
-              position: state.position,
-              duration: state.duration,
-              isDragging: isDraggingSeek,
-              onChangeStart: onSeekStart,
-              onChanged: onSeekUpdate,
-              onChangeEnd: onSeekEnd,
-            ),
-
-            _GhostMixingIndicator(
-              phase: state.mixPhase,
-              progress01: state.mixProgress01,
-            ),
-
-            const SizedBox(height: 20),
- 
-            _PlaybackControls(
-
-              isPlaying: state.isPlaying,
-              onPlayPause: onPlayPause,
-              onNext: onNext,
-              onPrevious: onPrevious,
-            ),
-
-            const SizedBox(height: 18),
-
-            _SecondaryControls(
-              shuffleEnabled: state.shuffleEnabled,
-              repeatMode: state.repeatMode,
-              onShuffle: onShuffle,
-              onRepeat: onRepeat,
-              onOpenQueue: onOpenQueue,
-              onOpenEqualizer: onOpenEqualizer,
-            ),
-
-            const SizedBox(height: 16),
-
-            _TechInfo(trackPath: track.filePath),
-          ],
+          ),
         ),
       ),
     );
@@ -1134,7 +1254,6 @@ class _MixDot extends StatelessWidget {
 }
 
 class _PlaybackControls extends StatelessWidget {
-
   final bool isPlaying;
   final VoidCallback onPlayPause;
   final VoidCallback onNext;
@@ -1454,15 +1573,11 @@ class _SecondaryButton extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final enabled = onPressed != null;
 
-    final bgColor = isActive
-        ? cs.primary.withValues(alpha: 0.15)
-        : Colors.transparent;
+    final bgColor = isActive ? cs.primary.withValues(alpha: 0.15) : Colors.transparent;
 
     final iconColor = isActive
         ? cs.primary
-        : (enabled
-            ? cs.onSurface.withValues(alpha: 0.75)
-            : cs.onSurface.withValues(alpha: 0.35));
+        : (enabled ? cs.onSurface.withValues(alpha: 0.75) : cs.onSurface.withValues(alpha: 0.35));
 
     return Tooltip(
       message: tooltip,

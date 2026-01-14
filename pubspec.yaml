@@ -16,6 +16,7 @@ dependencies:
   # Audio
   just_audio: ^0.10.5
   audio_session: ^0.2.2
+  audio_service: ^0.18.15
 
   # File System & Paths
   path: ^1.9.1

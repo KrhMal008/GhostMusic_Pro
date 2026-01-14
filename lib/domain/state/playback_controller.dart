@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/track.dart';
 import '../services/cover_art_service.dart';
+import '../services/ghost_audio_handler.dart';
 import 'playback_state.dart';
 
 /// Resolves an artwork image path for a track, if available.
@@ -93,9 +94,106 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     _activeDeck = _deckA;
 
     _initAudio();
+    _initAudioHandler();
     unawaited(_loadAutomixPrefs());
 
     // Start with empty queue; user selects tracks from library.
+  }
+  
+  // --- iOS Now Playing / Remote Controls ---
+  
+  void _initAudioHandler() {
+    final handler = GhostAudioHandler.instance;
+    if (handler == null) return;
+    
+    // Bind remote command callbacks
+    handler.onPlay = () => togglePlayPause();
+    handler.onPause = () => togglePlayPause();
+    handler.onSkipToNext = () => next();
+    handler.onSkipToPrevious = () => previous();
+    handler.onSeek = (position) => seek(position);
+    handler.onStop = () {
+      _enqueue(() async {
+        await _activeDeck.pause();
+        await _activeDeck.seek(Duration.zero);
+        state = state.copyWith(isPlaying: false, position: Duration.zero);
+      });
+    };
+  }
+  
+  /// Update Now Playing info for iOS Control Center / Lock Screen.
+  Future<void> _updateNowPlaying() async {
+    final handler = GhostAudioHandler.instance;
+    if (handler == null) return;
+    
+    final track = state.currentTrack;
+    if (track == null) {
+      handler.updateStopped();
+      return;
+    }
+    
+    // Try to get artwork URI
+    Uri? artUri;
+    try {
+      final artworkPath = await _resolveArtworkPath(track.filePath);
+      if (artworkPath != null) {
+        artUri = Uri.file(artworkPath);
+      }
+    } catch (_) {
+      // Artwork lookup failed, continue without it
+    }
+    
+    handler.updateNowPlaying(
+      title: track.displayTitle,
+      artist: track.artist,
+      album: track.album,
+      duration: state.duration,
+      artUri: artUri,
+      trackId: track.filePath,
+    );
+  }
+  
+  /// Resolve artwork path for Now Playing (simpler version of trackArtworkPathProvider).
+  Future<String?> _resolveArtworkPath(String trackPath) async {
+    // Check user override
+    final override = await CoverArtService.getOverrideForFile(trackPath);
+    if (override != null) return override;
+    
+    // Check embedded artwork cache
+    try {
+      final tmp = await getApplicationSupportDirectory();
+      final base = p.join(tmp.path, 'artwork_cache');
+      final hash = trackPath.hashCode;
+      
+      final jpg = File(p.join(base, 'art_$hash.jpg'));
+      if (await jpg.exists()) return jpg.path;
+      
+      final png = File(p.join(base, 'art_$hash.png'));
+      if (await png.exists()) return png.path;
+    } catch (_) {}
+    
+    // Check folder artwork
+    final dirPath = p.dirname(trackPath);
+    const candidates = ['cover.jpg', 'cover.png', 'folder.jpg', 'folder.png'];
+    for (final name in candidates) {
+      final file = File(p.join(dirPath, name));
+      if (await file.exists()) return file.path;
+    }
+    
+    return null;
+  }
+  
+  /// Update iOS playback state (position, playing status).
+  void _updatePlaybackStateForHandler() {
+    final handler = GhostAudioHandler.instance;
+    if (handler == null) return;
+    
+    handler.updatePlaybackState(
+      playing: state.isPlaying,
+      position: state.position,
+      bufferedPosition: state.position,
+      speed: 1.0,
+    );
   }
 
   // --- Preferences ---
@@ -305,6 +403,8 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
   // --- Deck bindings ---
 
+  DateTime? _lastHandlerUpdate;
+
   void _onDeckPlaying(_PlaybackDeck deck, bool playing) {
     final activePlaying = _activeDeck.lastPlaying;
     final mixingPlaying = (state.mixPhase == MixPhase.mixing) && _inactiveDeck.lastPlaying;
@@ -312,6 +412,8 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     if (state.isPlaying != overall) {
       state = state.copyWith(isPlaying: overall);
+      // Update iOS Now Playing state
+      _updatePlaybackStateForHandler();
     }
   }
 
@@ -320,11 +422,23 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     state = state.copyWith(position: position);
     _maybeScheduleAutomix();
+    
+    // Throttle iOS handler updates to ~1Hz to avoid excessive updates
+    final now = DateTime.now();
+    if (_lastHandlerUpdate == null || 
+        now.difference(_lastHandlerUpdate!) >= const Duration(milliseconds: 1000)) {
+      _lastHandlerUpdate = now;
+      _updatePlaybackStateForHandler();
+    }
   }
 
   void _onDeckDuration(_PlaybackDeck deck, Duration? duration) {
     if (!identical(deck, _activeDeck)) return;
     state = state.copyWith(currentDuration: duration);
+    // Update Now Playing when duration becomes known
+    if (duration != null) {
+      unawaited(_updateNowPlaying());
+    }
   }
 
   void _onDeckCompleted(_PlaybackDeck deck) {
@@ -1106,6 +1220,10 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     if (autoplay) {
       state = state.copyWith(isPlaying: _activeDeck.lastPlaying);
     }
+    
+    // Update iOS Now Playing with new track info
+    unawaited(_updateNowPlaying());
+    _updatePlaybackStateForHandler();
   }
 
   Future<void> _loadWithFallback(
@@ -1169,6 +1287,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         try {
           await _inactiveDeck.pause();
         } catch (_) {}
+        
+        // Update iOS handler with stopped state
+        GhostAudioHandler.instance?.updateStopped();
 
         return;
       }

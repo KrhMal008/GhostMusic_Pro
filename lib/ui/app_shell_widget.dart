@@ -153,9 +153,12 @@ class _BottomTabs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // Add bottom safe area inset + breathing room for home indicator
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final bottomPadding = bottomInset > 0 ? bottomInset + 8.0 : 12.0;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+      padding: EdgeInsets.fromLTRB(12, 6, 12, bottomPadding),
 
       child: GlassSurface.tabBar(
         child: SizedBox(

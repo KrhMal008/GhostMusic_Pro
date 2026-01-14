@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:ghostmusic/domain/services/ghost_audio_handler.dart';
 import 'package:ghostmusic/domain/services/http_overrides.dart';
 import 'package:ghostmusic/ui/app_shell.dart';
 import 'package:ghostmusic/ui/theme/app_theme.dart';
@@ -18,6 +19,10 @@ const bool kUseIPhone16ProPreviewOnWindows = true;
 void main() async {
 
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize audio_service for iOS Now Playing / Control Center / remote controls.
+  // On Windows, this is a no-op; playback uses MediaKit directly.
+  await GhostAudioHandler.init();
 
   // Windows dev environments often require a proxy and can miss root CAs.
   // Install safe overrides for debug builds.
