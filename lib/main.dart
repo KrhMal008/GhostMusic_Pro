@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -12,50 +13,85 @@ import 'package:ghostmusic/domain/services/ghost_audio_handler.dart';
 import 'package:ghostmusic/domain/services/http_overrides.dart';
 import 'package:ghostmusic/ui/app_shell.dart';
 import 'package:ghostmusic/ui/theme/app_theme.dart';
+import 'package:ghostmusic/utils/ghost_logger.dart';
 
 // Windows dev UX: render as an iPhone 16 Pro viewport by default.
 const bool kUseIPhone16ProPreviewOnWindows = true;
 
 void main() async {
+  // Run with error zone to catch all unhandled errors
+  runZonedGuarded(
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
 
-  WidgetsFlutterBinding.ensureInitialized();
+      // Initialize logger first for early error capture
+      await GhostLogger.instance.init();
+      glog.info('App', 'Ghost Music starting...');
 
-  // Initialize audio_service for iOS Now Playing / Control Center / remote controls.
-  // On Windows, this is a no-op; playback uses MediaKit directly.
-  await GhostAudioHandler.init();
+      // Set up Flutter error handling
+      FlutterError.onError = (FlutterErrorDetails details) {
+        glog.error(
+          'Flutter',
+          'FlutterError: ${details.exceptionAsString()}',
+          details.exception,
+          details.stack,
+        );
+        // Forward to default handler in debug mode
+        if (kDebugMode) {
+          FlutterError.dumpErrorToConsole(details);
+        }
+      };
 
-  // Windows dev environments often require a proxy and can miss root CAs.
-  // Install safe overrides for debug builds.
-  GhostHttpOverrides.installForWindowsDebug();
+      // Set up platform error handling
+      PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+        glog.error('Platform', 'Unhandled platform error', error, stack);
+        return true; // Handled
+      };
 
-  // Restore optional proxy rule (Windows debug).
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    GhostHttpOverrides.setProxyFromUserInput(prefs.getString('proxy_rule'));
-  } catch (_) {
-    // ignore
-  }
+      // Initialize audio_service for iOS Now Playing / Control Center / remote controls.
+      // On Windows, this is a no-op; playback uses MediaKit directly.
+      await GhostAudioHandler.init();
+      glog.info('App', 'Audio handler initialized');
 
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
-  ]);
+      // Windows dev environments often require a proxy and can miss root CAs.
+      // Install safe overrides for debug builds.
+      GhostHttpOverrides.installForWindowsDebug();
 
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarBrightness: Brightness.dark,
-    statusBarIconBrightness: Brightness.light,
-    systemNavigationBarColor: Colors.transparent,
-    systemNavigationBarIconBrightness: Brightness.light,
-    systemNavigationBarDividerColor: Colors.transparent,
-  ));
+      // Restore optional proxy rule (Windows debug).
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        GhostHttpOverrides.setProxyFromUserInput(prefs.getString('proxy_rule'));
+      } catch (_) {
+        // ignore
+      }
 
-  await SystemChrome.setEnabledSystemUIMode(
-    SystemUiMode.edgeToEdge,
-    overlays: [SystemUiOverlay.top, SystemUiOverlay.bottom],
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+      ]);
+
+      SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarBrightness: Brightness.dark,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarDividerColor: Colors.transparent,
+      ));
+
+      await SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.edgeToEdge,
+        overlays: [SystemUiOverlay.top, SystemUiOverlay.bottom],
+      );
+
+      glog.info('App', 'App initialization complete, launching UI');
+      runApp(const ProviderScope(child: GhostMusicApp()));
+    },
+    (Object error, StackTrace stack) {
+      // Catch any errors that escape the zone
+      glog.error('Zone', 'Unhandled zone error', error, stack);
+    },
   );
-
-  runApp(const ProviderScope(child: GhostMusicApp()));
 }
 
 class GhostMusicApp extends StatelessWidget {

@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/track.dart';
 import '../services/cover_art_service.dart';
 import '../services/ghost_audio_handler.dart';
+import '../../utils/ghost_logger.dart';
 import 'playback_state.dart';
 
 /// Resolves an artwork image path for a track, if available.
@@ -1275,6 +1276,12 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
   Future<void> setQueue(List<Track> queue, {int startIndex = 0, bool autoplay = false}) {
     final token = ++_setQueueToken;
+    
+    glog.playback('setQueue', 
+      queueLength: queue.length, 
+      queueIndex: startIndex,
+      extra: {'autoplay': autoplay},
+    );
 
     return _enqueue(() async {
       await _abortAutomix();

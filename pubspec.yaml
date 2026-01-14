@@ -40,6 +40,9 @@ dependencies:
   # Network (cover art lookup)
   http: ^1.2.2
 
+  # Sharing (logs export)
+  share_plus: ^10.1.4
+
   # Desktop backend (Windows)
   just_audio_windows: ^0.2.2
 

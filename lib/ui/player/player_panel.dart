@@ -1,3 +1,4 @@
+// player_panel.dart
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -8,19 +9,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
+import 'package:ghostmusic/domain/services/cover_art_service.dart';
 import 'package:ghostmusic/domain/state/library_controller.dart';
 import 'package:ghostmusic/domain/state/playback_controller.dart';
 import 'package:ghostmusic/domain/state/playback_state.dart';
 
 import 'package:ghostmusic/ui/artwork/artwork_view.dart';
-import 'package:ghostmusic/ui/audio/equalizer_tab.dart';
-import 'package:ghostmusic/ui/theme/app_theme.dart';
-
-import 'package:ghostmusic/ui/player/queue_sheet.dart';
-import 'package:ghostmusic/ui/widgets/glass_surface.dart';
 import 'package:ghostmusic/ui/artwork/cover_picker_sheet.dart';
-import 'package:ghostmusic/domain/services/cover_art_service.dart';
+import 'package:ghostmusic/ui/audio/equalizer_tab.dart';
 import 'package:ghostmusic/ui/library/tag_editor_sheet.dart';
+import 'package:ghostmusic/ui/player/queue_sheet.dart';
+import 'package:ghostmusic/ui/theme/app_theme.dart';
+import 'package:ghostmusic/ui/widgets/glass_surface.dart';
 
 class PlayerPanel extends ConsumerStatefulWidget {
   const PlayerPanel({super.key});
@@ -29,12 +29,11 @@ class PlayerPanel extends ConsumerStatefulWidget {
   ConsumerState<PlayerPanel> createState() => _PlayerPanelState();
 }
 
-class _PlayerPanelState extends ConsumerState<PlayerPanel>
-    with TickerProviderStateMixin {
+class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderStateMixin {
   bool _isDraggingSeek = false;
   double _dragSeekValue = 0.0;
 
-  // Drag-to-dismiss (smooth)
+  // Drag-to-dismiss
   double _dragOffset = 0.0;
   late final AnimationController _dismissAnimController;
   late Animation<double> _dragOffsetAnim;
@@ -42,7 +41,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
   late final AnimationController _artworkAnimController;
   late final Animation<double> _artworkScaleAnimation;
 
-  // Scroll controller for content - enables overscroll-to-dismiss from artwork area
+  // Scroll controller (pull-to-dismiss from content)
   final ScrollController _contentScrollController = ScrollController();
 
   @override
@@ -53,12 +52,14 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
       vsync: this,
       duration: const Duration(milliseconds: 300),
     );
+
     _artworkScaleAnimation = Tween<double>(begin: 0.95, end: 1.0).animate(
       CurvedAnimation(
         parent: _artworkAnimController,
         curve: Curves.easeOutCubic,
       ),
     );
+
     _artworkAnimController.forward();
 
     _dismissAnimController = AnimationController(
@@ -67,6 +68,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     );
 
     _dragOffsetAnim = AlwaysStoppedAnimation(_dragOffset);
+
     _dismissAnimController.addListener(() {
       if (!mounted) return;
       setState(() {
@@ -88,16 +90,15 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     Navigator.of(context).maybePop();
   }
 
-  // Drag should be only on header to avoid conflicts with scroll/slider
+  // ===== Header drag (ручка/хедер) =====
   void _onVerticalDragUpdate(DragUpdateDetails details) {
-    // Only downward drag
     if (details.delta.dy <= 0) return;
 
     if (_dismissAnimController.isAnimating) {
       _dismissAnimController.stop();
     }
 
-    final maxDrag = MediaQuery.of(context).size.height * 0.75; // no endless drag
+    final maxDrag = MediaQuery.of(context).size.height * 0.75;
     setState(() {
       _dragOffset = (_dragOffset + details.delta.dy).clamp(0.0, maxDrag);
     });
@@ -116,44 +117,70 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
       return;
     }
 
-    // Smooth snap-back to 0
-    _dragOffsetAnim = Tween<double>(begin: _dragOffset, end: 0.0).animate(
-      CurvedAnimation(
-        parent: _dismissAnimController,
-        curve: Curves.easeOutCubic,
-      ),
-    );
-    _dismissAnimController.forward(from: 0.0);
+    _animateBackToZero();
   }
 
-  // Handle overscroll at top to trigger dismiss (works on iOS + Windows)
+  // ===== Pull-to-dismiss из контента (обложка/scroll) =====
   bool _onScrollNotification(ScrollNotification notification) {
-    // Detect overscroll at top (user pulling down when already at top)
-    if (notification is OverscrollNotification) {
-      if (notification.overscroll < 0) {
-        // Pulling down at top - accumulate for dismiss
-        final delta = -notification.overscroll;
+    // Ключ: когда контент уже вверху (pixels <= 0),
+    // и пользователь тянет вниз (scrollDelta < 0),
+    // мы копим _dragOffset и двигаем весь экран.
+    if (notification is ScrollUpdateNotification) {
+      final delta = notification.scrollDelta ?? 0.0;
+
+      final isAtTop = notification.metrics.pixels <= 0.0;
+      final isPullingDown = delta < 0.0;
+
+      if (isAtTop && isPullingDown) {
         if (_dismissAnimController.isAnimating) {
           _dismissAnimController.stop();
         }
+
+        final pull = -delta; // делаем положительным
         final maxDrag = MediaQuery.of(context).size.height * 0.75;
+
         setState(() {
-          _dragOffset = (_dragOffset + delta).clamp(0.0, maxDrag);
+          _dragOffset = (_dragOffset + pull).clamp(0.0, maxDrag);
+        });
+      } else if (_dragOffset > 0 && delta > 0) {
+        // если пользователь начал двигать обратно вверх — уменьшаем dragOffset
+        setState(() {
+          _dragOffset = (_dragOffset - delta).clamp(0.0, double.infinity);
         });
       }
     }
-    // Detect scroll end to finalize dismiss decision
-    if (notification is ScrollEndNotification) {
-      if (_dragOffset > 0) {
-        _finalizeDismiss(Velocity.zero);
+
+    if (notification is OverscrollNotification) {
+      // На некоторых платформах overscroll может помогать добрать жест.
+      // overscroll < 0 означает "тянем вниз".
+      if (notification.overscroll < 0) {
+        if (_dismissAnimController.isAnimating) {
+          _dismissAnimController.stop();
+        }
+
+        final pull = -notification.overscroll;
+        final maxDrag = MediaQuery.of(context).size.height * 0.75;
+
+        setState(() {
+          _dragOffset = (_dragOffset + pull).clamp(0.0, maxDrag);
+        });
       }
     }
-    return false; // Don't absorb - let scroll view handle normally
+
+    if (notification is ScrollEndNotification) {
+      if (_dragOffset > 0) {
+        final velocity = notification.dragDetails?.velocity ?? Velocity.zero;
+        _finalizeDismiss(velocity);
+      }
+    }
+
+    return false;
   }
 
   void _finalizeDismiss(Velocity velocity) {
-    const dismissThreshold = 100.0;
-    const dismissVelocity = 500.0;
+    // Более “apple-like” пороги
+    const dismissThreshold = 70.0;
+    const dismissVelocity = 650.0;
 
     final vy = velocity.pixelsPerSecond.dy;
     final shouldDismiss = _dragOffset > dismissThreshold || vy > dismissVelocity;
@@ -164,7 +191,10 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
       return;
     }
 
-    // Smooth snap-back to 0
+    _animateBackToZero();
+  }
+
+  void _animateBackToZero() {
     _dragOffsetAnim = Tween<double>(begin: _dragOffset, end: 0.0).animate(
       CurvedAnimation(
         parent: _dismissAnimController,
@@ -358,6 +388,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
 
         await ctrl.setQueue(updatedQueue, startIndex: currentIndex, autoplay: false);
         await ctrl.seek(pos);
+
         if (wasPlaying) {
           await ctrl.togglePlayPause();
         }
@@ -408,7 +439,10 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                       onTap: () => Navigator.of(ctx).pop(f),
                     ),
                   if (folders.isNotEmpty)
-                    Divider(height: 1, color: Theme.of(ctx).colorScheme.onSurface.withValues(alpha: 0.10)),
+                    Divider(
+                      height: 1,
+                      color: Theme.of(ctx).colorScheme.onSurface.withValues(alpha: 0.10),
+                    ),
                   ListTile(
                     leading: const Icon(Icons.folder_open_rounded),
                     title: const Text('Выбрать другую папку…'),
@@ -498,7 +532,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     return AnimatedBuilder(
       animation: _dismissAnimController,
       builder: (context, child) {
-        // Animate the whole panel down when dragging
         return Transform.translate(
           offset: Offset(0, _dragOffset),
           child: child,
@@ -508,7 +541,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
         backgroundColor: Colors.transparent,
         body: Stack(
           children: [
-            // Background layers
             const Positioned.fill(child: ColoredBox(color: Colors.black)),
             Positioned.fill(
               child: ImageFiltered(
@@ -519,13 +551,10 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
             Positioned.fill(
               child: Container(color: Colors.black.withValues(alpha: 0.74)),
             ),
-            // Main content with proper safe area handling
             Positioned.fill(
               child: Column(
                 children: [
-                  // Top safe area spacer
                   SizedBox(height: topPadding),
-                  // Header with drag gesture (Apple Music style dismiss)
                   GestureDetector(
                     behavior: HitTestBehavior.translucent,
                     onVerticalDragUpdate: _onVerticalDragUpdate,
@@ -536,10 +565,9 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                       onOpenMore: track == null ? null : () => _openMore(track.filePath),
                     ),
                   ),
-                  // Main content area - NotificationListener for overscroll-to-dismiss
                   Expanded(
                     child: track == null
-                        ? _EmptyState()
+                        ? const _EmptyState()
                         : NotificationListener<ScrollNotification>(
                             onNotification: _onScrollNotification,
                             child: _PlayerContent(
@@ -575,11 +603,10 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                               onRepeat: () => ctrl.toggleRepeat(),
                               onOpenQueue: state.hasQueue ? _openQueue : null,
                               onOpenEqualizer: _openEqualizer,
-                              onOpenMore: () => _openMore(track.filePath),
+                              onOpenMore: track == null ? null : () => _openMore(track.filePath),
                             ),
                           ),
                   ),
-                  // Secondary controls pinned at bottom
                   if (track != null)
                     Padding(
                       padding: EdgeInsets.only(
@@ -622,9 +649,7 @@ class _AnimatedBackground extends StatelessWidget {
   Widget build(BuildContext context) {
     return artworkAsync.when(
       data: (path) {
-        if (path == null) {
-          return _GradientBackground();
-        }
+        if (path == null) return const _GradientBackground();
         return AnimatedSwitcher(
           duration: const Duration(milliseconds: 500),
           child: Image.file(
@@ -634,21 +659,22 @@ class _AnimatedBackground extends StatelessWidget {
             width: double.infinity,
             height: double.infinity,
             filterQuality: FilterQuality.medium,
-            errorBuilder: (_, __, ___) => _GradientBackground(),
+            errorBuilder: (_, __, ___) => const _GradientBackground(),
           ),
         );
       },
-      loading: () => _GradientBackground(),
-      error: (_, __) => _GradientBackground(),
+      loading: () => const _GradientBackground(),
+      error: (_, __) => const _GradientBackground(),
     );
   }
 }
 
 class _GradientBackground extends StatelessWidget {
+  const _GradientBackground();
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-
     return Container(
       decoration: BoxDecoration(
         gradient: AppGradients.playerBackground(cs.primary),
@@ -674,7 +700,6 @@ class _Header extends StatelessWidget {
 
     return Column(
       children: [
-        // Extra breathing room below Dynamic Island / notch (Apple Music style)
         const SizedBox(height: 10),
         const GlassHandle(),
         Padding(
@@ -710,6 +735,8 @@ class _Header extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
+  const _EmptyState();
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -750,19 +777,24 @@ class _PlayerContent extends StatelessWidget {
   final PlaybackState state;
   final AsyncValue<String?> artworkPath;
   final Animation<double> artworkAnimation;
+
   final bool isDraggingSeek;
   final double dragSeekValue;
+
   final ValueChanged<double> onSeekStart;
   final ValueChanged<double> onSeekUpdate;
   final ValueChanged<double> onSeekEnd;
+
   final VoidCallback onPlayPause;
   final VoidCallback onNext;
   final VoidCallback onPrevious;
   final VoidCallback onShuffle;
   final VoidCallback onRepeat;
+
   final VoidCallback? onOpenQueue;
   final VoidCallback? onOpenEqualizer;
   final VoidCallback? onOpenMore;
+
   final ScrollController? scrollController;
 
   const _PlayerContent({
@@ -802,7 +834,6 @@ class _PlayerContent extends StatelessWidget {
         constraints: const BoxConstraints(maxWidth: 520),
         child: SingleChildScrollView(
           controller: scrollController,
-          // Use BouncingScrollPhysics to generate OverscrollNotification for pull-to-dismiss
           physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
           child: Column(
@@ -999,6 +1030,7 @@ class _SeekBar extends StatelessWidget {
   final Duration position;
   final Duration? duration;
   final bool isDragging;
+
   final ValueChanged<double> onChangeStart;
   final ValueChanged<double> onChanged;
   final ValueChanged<double> onChangeEnd;
@@ -1145,9 +1177,7 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
     final accent = cs.primary;
 
     final shimmer = 0.5 + 0.5 * math.sin(_controller.value * math.pi * 2);
-    final progress = widget.phase == MixPhase.mixing
-        ? widget.progress01.clamp(0.0, 1.0)
-        : 0.0;
+    final progress = widget.phase == MixPhase.mixing ? widget.progress01.clamp(0.0, 1.0) : 0.0;
 
     final bg = Color.lerp(
       accent.withValues(alpha: 0.08),
@@ -1421,8 +1451,7 @@ class _ControlButton extends StatefulWidget {
   State<_ControlButton> createState() => _ControlButtonState();
 }
 
-class _ControlButtonState extends State<_ControlButton>
-    with SingleTickerProviderStateMixin {
+class _ControlButtonState extends State<_ControlButton> with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _scaleAnimation;
 
@@ -1524,47 +1553,42 @@ class _SecondaryControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
     final repeatIcon = switch (repeatMode) {
       1 => Icons.repeat_one_rounded,
       _ => Icons.repeat_rounded,
     };
 
-    return IconTheme(
-      data: IconThemeData(color: cs.onSurface.withValues(alpha: 0.75)),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _SecondaryButton(
-            icon: Icons.shuffle_rounded,
-            isActive: shuffleEnabled,
-            onPressed: onShuffle,
-            tooltip: 'Перемешать',
-          ),
-          const SizedBox(width: 14),
-          _SecondaryButton(
-            icon: repeatIcon,
-            isActive: repeatMode != 0,
-            onPressed: onRepeat,
-            tooltip: 'Повтор',
-          ),
-          const SizedBox(width: 14),
-          _SecondaryButton(
-            icon: Icons.tune_rounded,
-            isActive: false,
-            onPressed: onOpenEqualizer,
-            tooltip: 'Эквалайзер',
-          ),
-          const SizedBox(width: 14),
-          _SecondaryButton(
-            icon: Icons.queue_music_rounded,
-            isActive: false,
-            onPressed: onOpenQueue,
-            tooltip: 'Очередь',
-          ),
-        ],
-      ),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _SecondaryButton(
+          icon: Icons.shuffle_rounded,
+          isActive: shuffleEnabled,
+          onPressed: onShuffle,
+          tooltip: 'Перемешать',
+        ),
+        const SizedBox(width: 14),
+        _SecondaryButton(
+          icon: repeatIcon,
+          isActive: repeatMode != 0,
+          onPressed: onRepeat,
+          tooltip: 'Повтор',
+        ),
+        const SizedBox(width: 14),
+        _SecondaryButton(
+          icon: Icons.tune_rounded,
+          isActive: false,
+          onPressed: onOpenEqualizer,
+          tooltip: 'Эквалайзер',
+        ),
+        const SizedBox(width: 14),
+        _SecondaryButton(
+          icon: Icons.queue_music_rounded,
+          isActive: false,
+          onPressed: onOpenQueue,
+          tooltip: 'Очередь',
+        ),
+      ],
     );
   }
 }
