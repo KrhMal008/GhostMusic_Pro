@@ -222,7 +222,8 @@ class LibraryTab extends ConsumerWidget {
                       crossAxisCount: 2,
                       mainAxisSpacing: 14,
                       crossAxisSpacing: 14,
-                      childAspectRatio: 0.86,
+                      // Square artwork (1:1) + ~50px for labels = 0.78 aspect ratio
+                      childAspectRatio: 0.78,
                     ),
                     itemCount: items.length.clamp(0, 8),
                     itemBuilder: (context, index) => _RecentCollectionTile(item: items[index]),
@@ -432,7 +433,9 @@ class _RecentCollectionTile extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
+          // Square artwork with AspectRatio to ensure 1:1
+          AspectRatio(
+            aspectRatio: 1,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(14),
               child: DecoratedBox(

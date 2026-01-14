@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -181,6 +183,9 @@ class _CoverPickerContentState extends ConsumerState<_CoverPickerContent> {
         return;
       }
 
+      // Evict old image from Flutter's image cache so new cover shows immediately
+      imageCache.evict(FileImage(File(saved)));
+      
       ref.invalidate(trackArtworkPathProvider(widget.trackPath));
 
       navigator.pop(); // Close picker sheet
@@ -591,6 +596,9 @@ class _CoverPickerContentState extends ConsumerState<_CoverPickerContent> {
         return;
       }
 
+      // Evict old image from Flutter's image cache so new cover shows immediately
+      imageCache.evict(FileImage(File(saved)));
+      
       ref.invalidate(trackArtworkPathProvider(widget.trackPath));
 
       if (mounted) {

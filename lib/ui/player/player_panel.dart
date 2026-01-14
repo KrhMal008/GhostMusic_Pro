@@ -127,13 +127,15 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     _dismissAnimController.forward(from: 0.0);
   }
 
-  // Content area drag-to-dismiss: only activates when scroll is at top (iOS)
+  // Content area drag-to-dismiss: activates when scroll is at top
   void _onContentDragStart(DragStartDetails details) {
-    if (!Platform.isIOS) return;
-    // Arm dismiss if scroll is at top
+    // Arm dismiss if scroll is at top (works on all platforms)
     final atTop = !_contentScrollController.hasClients ||
         _contentScrollController.offset <= 0.0;
     _contentDismissActive = atTop;
+    if (_contentDismissActive) {
+      setState(() {}); // Trigger rebuild to disable scroll physics
+    }
   }
 
   void _onContentDragUpdate(DragUpdateDetails details) {
@@ -141,6 +143,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     // If user drags up, disarm and let scroll take over
     if (details.delta.dy < -2) {
       _contentDismissActive = false;
+      setState(() {}); // Re-enable scroll physics
       return;
     }
     // Forward to standard dismiss handler
@@ -148,11 +151,10 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
   }
 
   void _onContentDragEnd(DragEndDetails details) {
-    if (!_contentDismissActive) {
-      _contentDismissActive = false;
-      return;
-    }
+    final wasActive = _contentDismissActive;
     _contentDismissActive = false;
+    setState(() {}); // Re-enable scroll physics
+    if (!wasActive) return;
     _onVerticalDragEnd(details);
   }
 
@@ -534,6 +536,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                               isDraggingSeek: _isDraggingSeek,
                               dragSeekValue: _dragSeekValue,
                               scrollController: _contentScrollController,
+                              dismissDragActive: _contentDismissActive,
                               onSeekStart: (value) {
                                 setState(() {
                                   _isDraggingSeek = true;
@@ -749,6 +752,7 @@ class _PlayerContent extends StatelessWidget {
   final VoidCallback? onOpenEqualizer;
   final VoidCallback? onOpenMore;
   final ScrollController? scrollController;
+  final bool dismissDragActive;
 
   const _PlayerContent({
     required this.state,
@@ -764,6 +768,7 @@ class _PlayerContent extends StatelessWidget {
     required this.onPrevious,
     required this.onShuffle,
     required this.onRepeat,
+    this.dismissDragActive = false,
     this.onOpenQueue,
     this.onOpenEqualizer,
     this.onOpenMore,
@@ -787,9 +792,11 @@ class _PlayerContent extends StatelessWidget {
         constraints: const BoxConstraints(maxWidth: 520),
         child: SingleChildScrollView(
           controller: scrollController,
-          // iOS: ClampingScrollPhysics prevents bounce/overscroll that conflicts with dismiss gesture
-          // Other platforms: keep BouncingScrollPhysics for native feel
-          physics: Platform.isIOS ? const ClampingScrollPhysics() : const BouncingScrollPhysics(),
+          // When dismiss drag is active, disable scrolling so gesture goes to dismiss handler
+          // Otherwise: ClampingScrollPhysics on iOS, BouncingScrollPhysics elsewhere
+          physics: dismissDragActive 
+              ? const NeverScrollableScrollPhysics() 
+              : (Platform.isIOS ? const ClampingScrollPhysics() : const BouncingScrollPhysics()),
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
           child: Column(
             children: [
