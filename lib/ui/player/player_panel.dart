@@ -1,4 +1,3 @@
-// player_panel.dart
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -29,58 +28,49 @@ class PlayerPanel extends ConsumerStatefulWidget {
   ConsumerState<PlayerPanel> createState() => _PlayerPanelState();
 }
 
-class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderStateMixin {
+class _PlayerPanelState extends ConsumerState<PlayerPanel>
+    with TickerProviderStateMixin {
+  // Seek
   bool _isDraggingSeek = false;
   double _dragSeekValue = 0.0;
 
-  // Drag-to-dismiss
+  // Dismiss drag
   double _dragOffset = 0.0;
-  late final AnimationController _dismissAnimController;
+  late final AnimationController _dismissController;
   late Animation<double> _dragOffsetAnim;
 
-  late final AnimationController _artworkAnimController;
+  // Artwork intro anim
+  late final AnimationController _artworkIntroController;
   late final Animation<double> _artworkScaleAnimation;
 
-  // Scroll controller (pull-to-dismiss from content)
+  // оставляем на будущее (если вернёшь скролл/лирикс)
   final ScrollController _contentScrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
 
-    _artworkAnimController = AnimationController(
+    _artworkIntroController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 300),
+      duration: AppDuration.slow,
     );
-
-    _artworkScaleAnimation = Tween<double>(begin: 0.95, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _artworkAnimController,
-        curve: Curves.easeOutCubic,
-      ),
+    _artworkScaleAnimation = Tween<double>(begin: 0.96, end: 1.0).animate(
+      CurvedAnimation(parent: _artworkIntroController, curve: AppCurves.enter),
     );
+    _artworkIntroController.forward();
 
-    _artworkAnimController.forward();
-
-    _dismissAnimController = AnimationController(
+    _dismissController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 260),
+      duration: AppDuration.medium,
     );
 
-    _dragOffsetAnim = AlwaysStoppedAnimation(_dragOffset);
-
-    _dismissAnimController.addListener(() {
-      if (!mounted) return;
-      setState(() {
-        _dragOffset = _dragOffsetAnim.value;
-      });
-    });
+    _dragOffsetAnim = const AlwaysStoppedAnimation(0.0);
   }
 
   @override
   void dispose() {
-    _artworkAnimController.dispose();
-    _dismissAnimController.dispose();
+    _artworkIntroController.dispose();
+    _dismissController.dispose();
     _contentScrollController.dispose();
     super.dispose();
   }
@@ -90,21 +80,54 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
     Navigator.of(context).maybePop();
   }
 
-  // ===== Header drag (ручка/хедер) =====
-  void _onVerticalDragUpdate(DragUpdateDetails details) {
-    if (details.delta.dy <= 0) return;
+  double _maxDrag(BuildContext context) =>
+      MediaQuery.of(context).size.height * 0.75;
 
-    if (_dismissAnimController.isAnimating) {
-      _dismissAnimController.stop();
+  double _effectiveOffset() {
+    if (_dismissController.isAnimating) return _dragOffsetAnim.value;
+    return _dragOffset;
+  }
+
+  bool _canStartDismissDrag() {
+    // Сейчас контент НЕ скроллится, так что это всегда true.
+    // Оставлено для будущего, если вернёшь скролл.
+    if (!_contentScrollController.hasClients) return true;
+    return _contentScrollController.offset <= 0.0;
+  }
+
+  void _startDragIfPossible() {
+    if (!_canStartDismissDrag()) return;
+
+    if (_dismissController.isAnimating) {
+      _dragOffset = _dragOffsetAnim.value;
+      _dismissController.stop();
+      _dragOffsetAnim = AlwaysStoppedAnimation(_dragOffset);
     }
+  }
 
-    final maxDrag = MediaQuery.of(context).size.height * 0.75;
+  void _onDismissDragUpdate(DragUpdateDetails details) {
+    if (_isDraggingSeek) return; // когда тянут слайдер — не закрываем панель
+
+    final dy = details.delta.dy;
+
+    // закрываем только движением ВНИЗ
+    if (dy <= 0) return;
+
+    _startDragIfPossible();
+
+    final maxDrag = _maxDrag(context);
+
     setState(() {
-      _dragOffset = (_dragOffset + details.delta.dy).clamp(0.0, maxDrag);
+      _dragOffset = (_dragOffset + dy).clamp(0.0, maxDrag);
+      _dragOffsetAnim = AlwaysStoppedAnimation(_dragOffset);
     });
   }
 
-  void _onVerticalDragEnd(DragEndDetails details) {
+  void _onDismissDragEnd(DragEndDetails details) {
+    if (_isDraggingSeek) return;
+
+    final maxDrag = _maxDrag(context);
+
     const dismissThreshold = 120.0;
     const dismissVelocity = 900.0;
 
@@ -117,91 +140,19 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
       return;
     }
 
-    _animateBackToZero();
-  }
-
-  // ===== Pull-to-dismiss из контента (обложка/scroll) =====
-  bool _onScrollNotification(ScrollNotification notification) {
-    // Ключ: когда контент уже вверху (pixels <= 0),
-    // и пользователь тянет вниз (scrollDelta < 0),
-    // мы копим _dragOffset и двигаем весь экран.
-    if (notification is ScrollUpdateNotification) {
-      final delta = notification.scrollDelta ?? 0.0;
-
-      final isAtTop = notification.metrics.pixels <= 0.0;
-      final isPullingDown = delta < 0.0;
-
-      if (isAtTop && isPullingDown) {
-        if (_dismissAnimController.isAnimating) {
-          _dismissAnimController.stop();
-        }
-
-        final pull = -delta; // делаем положительным
-        final maxDrag = MediaQuery.of(context).size.height * 0.75;
-
-        setState(() {
-          _dragOffset = (_dragOffset + pull).clamp(0.0, maxDrag);
-        });
-      } else if (_dragOffset > 0 && delta > 0) {
-        // если пользователь начал двигать обратно вверх — уменьшаем dragOffset
-        setState(() {
-          _dragOffset = (_dragOffset - delta).clamp(0.0, double.infinity);
-        });
-      }
-    }
-
-    if (notification is OverscrollNotification) {
-      // На некоторых платформах overscroll может помогать добрать жест.
-      // overscroll < 0 означает "тянем вниз".
-      if (notification.overscroll < 0) {
-        if (_dismissAnimController.isAnimating) {
-          _dismissAnimController.stop();
-        }
-
-        final pull = -notification.overscroll;
-        final maxDrag = MediaQuery.of(context).size.height * 0.75;
-
-        setState(() {
-          _dragOffset = (_dragOffset + pull).clamp(0.0, maxDrag);
-        });
-      }
-    }
-
-    if (notification is ScrollEndNotification) {
-      if (_dragOffset > 0) {
-        final velocity = notification.dragDetails?.velocity ?? Velocity.zero;
-        _finalizeDismiss(velocity);
-      }
-    }
-
-    return false;
-  }
-
-  void _finalizeDismiss(Velocity velocity) {
-    // Более “apple-like” пороги
-    const dismissThreshold = 70.0;
-    const dismissVelocity = 650.0;
-
-    final vy = velocity.pixelsPerSecond.dy;
-    final shouldDismiss = _dragOffset > dismissThreshold || vy > dismissVelocity;
-
-    if (shouldDismiss) {
-      HapticFeedback.lightImpact();
-      Navigator.of(context).pop();
-      return;
-    }
-
-    _animateBackToZero();
-  }
-
-  void _animateBackToZero() {
     _dragOffsetAnim = Tween<double>(begin: _dragOffset, end: 0.0).animate(
-      CurvedAnimation(
-        parent: _dismissAnimController,
-        curve: Curves.easeOutCubic,
-      ),
+      CurvedAnimation(parent: _dismissController, curve: AppCurves.exit),
     );
-    _dismissAnimController.forward(from: 0.0);
+
+    _dismissController.forward(from: 0.0).whenComplete(() {
+      if (!mounted) return;
+      setState(() {
+        _dragOffset = 0.0;
+        _dragOffsetAnim = const AlwaysStoppedAnimation(0.0);
+      });
+    });
+
+    _dragOffset = _dragOffset.clamp(0.0, maxDrag);
   }
 
   void _openQueue() {
@@ -209,8 +160,9 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      enableDrag: true,
       backgroundColor: Colors.transparent,
-      barrierColor: Colors.black54,
+      barrierColor: Colors.black.withValues(alpha: AppOpacity.scrim),
       builder: (_) => DraggableScrollableSheet(
         initialChildSize: 0.75,
         minChildSize: 0.5,
@@ -224,7 +176,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
 
   void _openEqualizer() {
     HapticFeedback.selectionClick();
-
     final size = MediaQuery.of(context).size;
 
     showModalBottomSheet<void>(
@@ -294,12 +245,12 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
                         await CoverArtService.clearNetCacheForFile(trackPath);
                         await CoverArtService.getOrFetchForFile(trackPath);
                       } catch (_) {}
-                      if (mounted) {
-                        ref.invalidate(trackArtworkPathProvider(trackPath));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Повторный поиск обложки запущен')),
-                        );
-                      }
+
+                      if (!mounted) return;
+                      ref.invalidate(trackArtworkPathProvider(trackPath));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Повторный поиск обложки запущен')),
+                      );
                     },
                   ),
                   const SizedBox(height: 8),
@@ -378,9 +329,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
         final pos = playback.position;
         final currentIndex = playback.currentIndex ?? 0;
 
-        if (wasPlaying) {
-          await ctrl.togglePlayPause();
-        }
+        if (wasPlaying) await ctrl.togglePlayPause();
 
         final updatedQueue = playback.queue
             .map((t) => t.filePath == trackPath ? t.copyWith(filePath: newPath) : t)
@@ -389,9 +338,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
         await ctrl.setQueue(updatedQueue, startIndex: currentIndex, autoplay: false);
         await ctrl.seek(pos);
 
-        if (wasPlaying) {
-          await ctrl.togglePlayPause();
-        }
+        if (wasPlaying) await ctrl.togglePlayPause();
       }
 
       ref.read(libraryControllerProvider.notifier).rescan();
@@ -431,11 +378,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
                     ListTile(
                       leading: const Icon(Icons.folder_rounded),
                       title: Text(p.basename(f).isEmpty ? f : p.basename(f)),
-                      subtitle: Text(
-                        f,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      subtitle: Text(f, maxLines: 1, overflow: TextOverflow.ellipsis),
                       onTap: () => Navigator.of(ctx).pop(f),
                     ),
                   if (folders.isNotEmpty)
@@ -471,14 +414,10 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
     required bool move,
   }) async {
     final src = File(srcPath);
-    if (!await src.exists()) {
-      throw Exception('Файл не найден');
-    }
+    if (!await src.exists()) throw Exception('Файл не найден');
 
     final targetDir = Directory(destDir);
-    if (!await targetDir.exists()) {
-      await targetDir.create(recursive: true);
-    }
+    if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
     final base = p.basenameWithoutExtension(srcPath);
     final ext = p.extension(srcPath);
@@ -493,9 +432,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
     while (await File(outPath).exists()) {
       n++;
       outPath = candidate(n);
-      if (n > 999) {
-        throw Exception('Слишком много файлов с одинаковым именем');
-      }
+      if (n > 999) throw Exception('Слишком много файлов с одинаковым именем');
     }
 
     if (!move) {
@@ -521,20 +458,30 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
     final ctrl = ref.read(playbackControllerProvider.notifier);
 
     final track = state.currentTrack;
-    final artworkPath = track != null
+    final artworkAsync = track != null
         ? ref.watch(trackArtworkPathProvider(track.filePath))
         : const AsyncValue<String?>.data(null);
 
-    final mediaQuery = MediaQuery.of(context);
-    final topPadding = mediaQuery.padding.top;
-    final bottomPadding = mediaQuery.padding.bottom;
+    final mq = MediaQuery.of(context);
+    final topPadding = mq.padding.top;
+    final bottomPadding = mq.padding.bottom;
 
     return AnimatedBuilder(
-      animation: _dismissAnimController,
+      animation: _dismissController,
       builder: (context, child) {
+        final maxDrag = _maxDrag(context);
+        final offset = _effectiveOffset();
+
+        final t = (offset / maxDrag).clamp(0.0, 1.0);
+        final scale = lerpDouble(1.0, 0.965, t)!;
+
         return Transform.translate(
-          offset: Offset(0, _dragOffset),
-          child: child,
+          offset: Offset(0, offset),
+          child: Transform.scale(
+            alignment: Alignment.topCenter,
+            scale: scale,
+            child: child,
+          ),
         );
       },
       child: Scaffold(
@@ -542,95 +489,102 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel> with TickerProviderSt
         body: Stack(
           children: [
             const Positioned.fill(child: ColoredBox(color: Colors.black)),
+
+            // blurred bg
             Positioned.fill(
-              child: ImageFiltered(
-                imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-                child: _AnimatedBackground(artworkAsync: artworkPath),
+              child: RepaintBoundary(
+                child: ImageFiltered(
+                  imageFilter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+                  child: _AnimatedBackground(artworkAsync: artworkAsync),
+                ),
               ),
             ),
+
+            const Positioned.fill(child: _VignetteOverlay()),
+            const Positioned.fill(child: _NoiseOverlay(opacity: 0.035)),
+
+            // IMPORTANT:
+            // Весь экран ловит drag-to-dismiss (как “панель”, а не отдельная обложка)
+            // Но мы разрешаем только swipe DOWN (это уже проверено в _onDismissDragUpdate)
             Positioned.fill(
-              child: Container(color: Colors.black.withValues(alpha: 0.74)),
-            ),
-            Positioned.fill(
-              child: Column(
-                children: [
-                  SizedBox(height: topPadding),
-                  GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onVerticalDragUpdate: _onVerticalDragUpdate,
-                    onVerticalDragEnd: _onVerticalDragEnd,
-                    child: _Header(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onVerticalDragUpdate: _onDismissDragUpdate,
+                onVerticalDragEnd: _onDismissDragEnd,
+                child: Column(
+                  children: [
+                    SizedBox(height: topPadding),
+
+                    _Header(
                       onClose: _close,
                       onOpenQueue: state.hasQueue ? _openQueue : null,
                       onOpenMore: track == null ? null : () => _openMore(track.filePath),
+                      // можно оставить: хедер тоже отдельно ловит
+                      onDragUpdate: _onDismissDragUpdate,
+                      onDragEnd: _onDismissDragEnd,
                     ),
-                  ),
-                  Expanded(
-                    child: track == null
-                        ? const _EmptyState()
-                        : NotificationListener<ScrollNotification>(
-                            onNotification: _onScrollNotification,
-                            child: _PlayerContent(
+
+                    Expanded(
+                      child: track == null
+                          ? const _EmptyState()
+                          : _PlayerContent(
                               state: state,
-                              artworkPath: artworkPath,
-                              artworkAnimation: _artworkScaleAnimation,
+                              artworkScale: _artworkScaleAnimation,
+
+                              // НИКАКОГО SingleChildScrollView -> не листается “как браузер”
                               isDraggingSeek: _isDraggingSeek,
                               dragSeekValue: _dragSeekValue,
-                              scrollController: _contentScrollController,
                               onSeekStart: (value) {
                                 setState(() {
                                   _isDraggingSeek = true;
                                   _dragSeekValue = value;
                                 });
                               },
-                              onSeekUpdate: (value) {
-                                setState(() => _dragSeekValue = value);
-                              },
+                              onSeekUpdate: (value) => setState(() => _dragSeekValue = value),
                               onSeekEnd: (value) async {
                                 final duration = state.duration;
                                 if (duration != null) {
                                   final seekMs = (duration.inMilliseconds * value).round();
                                   await ctrl.seek(Duration(milliseconds: seekMs));
                                 }
-                                if (mounted) {
-                                  setState(() => _isDraggingSeek = false);
-                                }
+                                if (!mounted) return;
+                                setState(() => _isDraggingSeek = false);
                               },
+
                               onPlayPause: () => ctrl.togglePlayPause(),
                               onNext: () => ctrl.next(),
                               onPrevious: () => ctrl.previous(),
-                              onShuffle: () => ctrl.toggleShuffle(),
-                              onRepeat: () => ctrl.toggleRepeat(),
                               onOpenQueue: state.hasQueue ? _openQueue : null,
                               onOpenEqualizer: _openEqualizer,
                               onOpenMore: track == null ? null : () => _openMore(track.filePath),
                             ),
-                          ),
-                  ),
-                  if (track != null)
-                    Padding(
-                      padding: EdgeInsets.only(
-                        left: 20,
-                        right: 20,
-                        bottom: bottomPadding + 16,
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _SecondaryControls(
-                            shuffleEnabled: state.shuffleEnabled,
-                            repeatMode: state.repeatMode,
-                            onShuffle: () => ctrl.toggleShuffle(),
-                            onRepeat: () => ctrl.toggleRepeat(),
-                            onOpenQueue: state.hasQueue ? _openQueue : null,
-                            onOpenEqualizer: _openEqualizer,
-                          ),
-                          const SizedBox(height: 16),
-                          _TechInfo(trackPath: track.filePath),
-                        ],
-                      ),
                     ),
-                ],
+
+                    if (track != null)
+                      Padding(
+                        padding: EdgeInsets.only(
+                          left: 20,
+                          right: 20,
+                          bottom: bottomPadding + 16,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _SecondaryControls(
+                              shuffleEnabled: state.shuffleEnabled,
+                              repeatMode: state.repeatMode,
+                              onShuffle: () => ctrl.toggleShuffle(),
+                              onRepeat: () => ctrl.toggleRepeat(),
+                              onOpenQueue: state.hasQueue ? _openQueue : null,
+                              onOpenEqualizer: _openEqualizer,
+                            ),
+                            const SizedBox(height: 16),
+                            _TechInfo(trackPath: track.filePath),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -651,7 +605,7 @@ class _AnimatedBackground extends StatelessWidget {
       data: (path) {
         if (path == null) return const _GradientBackground();
         return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 500),
+          duration: AppDuration.smooth,
           child: Image.file(
             File(path),
             key: ValueKey(path),
@@ -675,12 +629,81 @@ class _GradientBackground extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Container(
-      decoration: BoxDecoration(
-        gradient: AppGradients.playerBackground(cs.primary),
+    return DecoratedBox(
+      decoration: BoxDecoration(gradient: AppGradients.playerBackground(cs.primary)),
+    );
+  }
+}
+
+class _VignetteOverlay extends StatelessWidget {
+  const _VignetteOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: RadialGradient(
+            center: const Alignment(0.0, -0.2),
+            radius: 1.2,
+            colors: [
+              Colors.transparent,
+              Colors.black.withValues(alpha: 0.35),
+              Colors.black.withValues(alpha: 0.60),
+            ],
+            stops: const [0.0, 0.55, 1.0],
+          ),
+        ),
+        child: const SizedBox.expand(),
       ),
     );
   }
+}
+
+class _NoiseOverlay extends StatelessWidget {
+  final double opacity;
+  const _NoiseOverlay({required this.opacity});
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: RepaintBoundary(
+        child: CustomPaint(
+          painter: _NoisePainter(opacity: opacity),
+          child: const SizedBox.expand(),
+        ),
+      ),
+    );
+  }
+}
+
+class _NoisePainter extends CustomPainter {
+  final double opacity;
+
+  _NoisePainter({required this.opacity});
+
+  static final List<Offset> _points = (() {
+    final rnd = math.Random(1337);
+    final list = <Offset>[];
+    for (var i = 0; i < 900; i++) {
+      list.add(Offset(rnd.nextDouble(), rnd.nextDouble()));
+    }
+    return list;
+  })();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withValues(alpha: opacity.clamp(0.0, 1.0))
+      ..strokeWidth = 1.0
+      ..strokeCap = StrokeCap.round;
+
+    final pts = _points.map((p) => Offset(p.dx * size.width, p.dy * size.height)).toList(growable: false);
+    canvas.drawPoints(PointMode.points, pts, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _NoisePainter oldDelegate) => false;
 }
 
 class _Header extends StatelessWidget {
@@ -688,8 +711,13 @@ class _Header extends StatelessWidget {
   final VoidCallback? onOpenQueue;
   final VoidCallback? onOpenMore;
 
+  final GestureDragUpdateCallback onDragUpdate;
+  final GestureDragEndCallback onDragEnd;
+
   const _Header({
     required this.onClose,
+    required this.onDragUpdate,
+    required this.onDragEnd,
     this.onOpenQueue,
     this.onOpenMore,
   });
@@ -698,38 +726,43 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
 
-    return Column(
-      children: [
-        const SizedBox(height: 10),
-        const GlassHandle(),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
-          child: Row(
-            children: [
-              IconButton(
-                onPressed: onClose,
-                icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32),
-                color: cs.onSurface,
-                tooltip: 'Close',
-              ),
-              const Spacer(),
-              if (onOpenQueue != null)
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onVerticalDragUpdate: onDragUpdate,
+      onVerticalDragEnd: onDragEnd,
+      child: Column(
+        children: [
+          const SizedBox(height: 10),
+          const GlassHandle(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
+            child: Row(
+              children: [
                 IconButton(
-                  onPressed: onOpenQueue,
-                  icon: const Icon(Icons.queue_music_rounded, size: 26),
-                  color: cs.onSurface.withValues(alpha: 0.85),
-                  tooltip: 'Queue',
+                  onPressed: onClose,
+                  icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32),
+                  color: cs.onSurface,
+                  tooltip: 'Close',
                 ),
-              IconButton(
-                onPressed: onOpenMore,
-                icon: const Icon(Icons.more_horiz_rounded, size: 26),
-                color: cs.onSurface.withValues(alpha: 0.85),
-                tooltip: 'Ещё',
-              ),
-            ],
+                const Spacer(),
+                if (onOpenQueue != null)
+                  IconButton(
+                    onPressed: onOpenQueue,
+                    icon: const Icon(Icons.queue_music_rounded, size: 26),
+                    color: cs.onSurface.withValues(alpha: 0.85),
+                    tooltip: 'Queue',
+                  ),
+                IconButton(
+                  onPressed: onOpenMore,
+                  icon: const Icon(Icons.more_horiz_rounded, size: 26),
+                  color: cs.onSurface.withValues(alpha: 0.85),
+                  tooltip: 'Ещё',
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -745,11 +778,7 @@ class _EmptyState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.music_off_rounded,
-            size: 64,
-            color: cs.onSurface.withValues(alpha: 0.25),
-          ),
+          Icon(Icons.music_off_rounded, size: 64, color: cs.onSurface.withValues(alpha: 0.25)),
           const SizedBox(height: 16),
           Text(
             'Nothing Playing',
@@ -762,10 +791,7 @@ class _EmptyState extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             'Select a track from your library',
-            style: TextStyle(
-              fontSize: 14,
-              color: cs.onSurface.withValues(alpha: 0.4),
-            ),
+            style: TextStyle(fontSize: 14, color: cs.onSurface.withValues(alpha: 0.4)),
           ),
         ],
       ),
@@ -775,12 +801,11 @@ class _EmptyState extends StatelessWidget {
 
 class _PlayerContent extends StatelessWidget {
   final PlaybackState state;
-  final AsyncValue<String?> artworkPath;
-  final Animation<double> artworkAnimation;
+
+  final Animation<double> artworkScale;
 
   final bool isDraggingSeek;
   final double dragSeekValue;
-
   final ValueChanged<double> onSeekStart;
   final ValueChanged<double> onSeekUpdate;
   final ValueChanged<double> onSeekEnd;
@@ -788,19 +813,14 @@ class _PlayerContent extends StatelessWidget {
   final VoidCallback onPlayPause;
   final VoidCallback onNext;
   final VoidCallback onPrevious;
-  final VoidCallback onShuffle;
-  final VoidCallback onRepeat;
 
   final VoidCallback? onOpenQueue;
   final VoidCallback? onOpenEqualizer;
   final VoidCallback? onOpenMore;
 
-  final ScrollController? scrollController;
-
   const _PlayerContent({
     required this.state,
-    required this.artworkPath,
-    required this.artworkAnimation,
+    required this.artworkScale,
     required this.isDraggingSeek,
     required this.dragSeekValue,
     required this.onSeekStart,
@@ -809,12 +829,9 @@ class _PlayerContent extends StatelessWidget {
     required this.onPlayPause,
     required this.onNext,
     required this.onPrevious,
-    required this.onShuffle,
-    required this.onRepeat,
     this.onOpenQueue,
     this.onOpenEqualizer,
     this.onOpenMore,
-    this.scrollController,
   });
 
   @override
@@ -832,17 +849,19 @@ class _PlayerContent extends StatelessWidget {
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 520),
-        child: SingleChildScrollView(
-          controller: scrollController,
-          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
           child: Column(
+            mainAxisSize: MainAxisSize.max,
             children: [
+              // Обложка больше не в скролле — ощущается частью панели
               ScaleTransition(
-                scale: artworkAnimation,
+                scale: artworkScale,
                 child: _ArtworkContainer(trackPath: track.filePath),
               ),
+
               const SizedBox(height: 18),
+
               if (queuePosition != null) ...[
                 Center(
                   child: Text(
@@ -857,13 +876,16 @@ class _PlayerContent extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
               ],
+
               _TrackDetails(
                 title: track.displayTitle,
                 artist: track.artist,
                 album: track.album,
                 onMore: onOpenMore,
               ),
+
               const SizedBox(height: 14),
+
               _SeekBar(
                 value: seekValue,
                 position: state.position,
@@ -873,18 +895,84 @@ class _PlayerContent extends StatelessWidget {
                 onChanged: onSeekUpdate,
                 onChangeEnd: onSeekEnd,
               ),
+
               _GhostMixingIndicator(
                 phase: state.mixPhase,
                 progress01: state.mixProgress01,
               ),
+
               const SizedBox(height: 20),
+
               _PlaybackControls(
                 isPlaying: state.isPlaying,
                 onPlayPause: onPlayPause,
                 onNext: onNext,
                 onPrevious: onPrevious,
               ),
+
               const SizedBox(height: 18),
+
+              if (onOpenQueue != null || onOpenEqualizer != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: GlassSurface.chip(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (onOpenEqualizer != null) ...[
+                            GestureDetector(
+                              onTap: () {
+                                HapticFeedback.selectionClick();
+                                onOpenEqualizer?.call();
+                              },
+                              child: Row(
+                                children: [
+                                  Icon(Icons.tune_rounded, size: 18, color: cs.onSurface.withValues(alpha: 0.82)),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'EQ',
+                                    style: TextStyle(
+                                      color: cs.onSurface.withValues(alpha: 0.82),
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                          if (onOpenEqualizer != null && onOpenQueue != null)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              child: Container(width: 1, height: 18, color: cs.onSurface.withValues(alpha: 0.10)),
+                            ),
+                          if (onOpenQueue != null) ...[
+                            GestureDetector(
+                              onTap: () {
+                                HapticFeedback.selectionClick();
+                                onOpenQueue?.call();
+                              },
+                              child: Row(
+                                children: [
+                                  Icon(Icons.queue_music_rounded, size: 18, color: cs.onSurface.withValues(alpha: 0.82)),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Queue',
+                                    style: TextStyle(
+                                      color: cs.onSurface.withValues(alpha: 0.82),
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -901,47 +989,86 @@ class _ArtworkContainer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final glow = cs.primary.withValues(alpha: 0.24);
 
-    return AspectRatio(
-      aspectRatio: 1,
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.35),
-              blurRadius: 30,
-              offset: const Offset(0, 15),
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Positioned.fill(
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: RadialGradient(
+                  center: Alignment.center,
+                  radius: 0.9,
+                  colors: [glow, Colors.transparent],
+                  stops: const [0.0, 1.0],
+                ),
+              ),
             ),
-          ],
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(20),
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: TrackArtwork(
-                  trackPath: trackPath,
-                  size: double.infinity,
-                  radius: 20,
-                  fit: BoxFit.cover,
-                ),
-              ),
-              Positioned.fill(
-                child: Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: cs.onSurface.withValues(alpha: 0.10),
-                      width: 0.5,
-                    ),
-                  ),
-                ),
-              ),
-            ],
           ),
         ),
-      ),
+        AspectRatio(
+          aspectRatio: 1,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.35),
+                  blurRadius: 30,
+                  offset: const Offset(0, 15),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: TrackArtwork(
+                      trackPath: trackPath,
+                      size: double.infinity,
+                      radius: AppRadius.artworkLarge,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
+                        border: Border.all(
+                          color: cs.onSurface.withValues(alpha: 0.10),
+                          width: 0.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Colors.white.withValues(alpha: 0.10),
+                              Colors.transparent,
+                              Colors.black.withValues(alpha: 0.10),
+                            ],
+                            stops: const [0.0, 0.55, 1.0],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -968,9 +1095,7 @@ class _TrackDetails extends StatelessWidget {
 
     final subtitleParts = <String>[];
     if (artistText != null && artistText.isNotEmpty) subtitleParts.add(artistText);
-    if (albumText != null && albumText.isNotEmpty && albumText != artistText) {
-      subtitleParts.add(albumText);
-    }
+    if (albumText != null && albumText.isNotEmpty && albumText != artistText) subtitleParts.add(albumText);
 
     final subtitle = subtitleParts.isEmpty ? null : subtitleParts.join(' • ');
 
@@ -1030,7 +1155,6 @@ class _SeekBar extends StatelessWidget {
   final Duration position;
   final Duration? duration;
   final bool isDragging;
-
   final ValueChanged<double> onChangeStart;
   final ValueChanged<double> onChanged;
   final ValueChanged<double> onChangeEnd;
@@ -1117,12 +1241,14 @@ class _SeekBar extends StatelessWidget {
 
     String twoDigits(int n) => n.toString().padLeft(2, '0');
 
-    if (hours > 0) {
-      return '${twoDigits(hours)}:${twoDigits(minutes)}:${twoDigits(seconds)}';
-    }
+    if (hours > 0) return '${twoDigits(hours)}:${twoDigits(minutes)}:${twoDigits(seconds)}';
     return '${twoDigits(minutes)}:${twoDigits(seconds)}';
   }
 }
+
+// ---- ниже: индикатор микса + контролы ----
+// Если у тебя в проекте эта часть уже есть в других файлах — оставляй как есть.
+// Здесь — рабочая версия, без обрывов.
 
 class _GhostMixingIndicator extends StatefulWidget {
   final MixPhase phase;
@@ -1145,9 +1271,7 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
   void initState() {
     super.initState();
     _controller = AnimationController(vsync: this, duration: AppDuration.gradientShift);
-    if (widget.phase != MixPhase.off) {
-      _controller.repeat();
-    }
+    if (widget.phase != MixPhase.off) _controller.repeat();
   }
 
   @override
@@ -1155,7 +1279,6 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
     super.didUpdateWidget(oldWidget);
 
     final shouldAnimate = widget.phase != MixPhase.off;
-
     if (shouldAnimate && !_controller.isAnimating) {
       _controller.repeat();
     } else if (!shouldAnimate && _controller.isAnimating) {
@@ -1179,23 +1302,9 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
     final shimmer = 0.5 + 0.5 * math.sin(_controller.value * math.pi * 2);
     final progress = widget.phase == MixPhase.mixing ? widget.progress01.clamp(0.0, 1.0) : 0.0;
 
-    final bg = Color.lerp(
-      accent.withValues(alpha: 0.08),
-      accent.withValues(alpha: 0.14),
-      shimmer,
-    )!;
-
-    final border = Color.lerp(
-      accent.withValues(alpha: 0.16),
-      accent.withValues(alpha: 0.26),
-      shimmer,
-    )!;
-
-    final text = Color.lerp(
-      cs.onSurface.withValues(alpha: 0.60),
-      accent.withValues(alpha: 0.95),
-      shimmer,
-    )!;
+    final bg = Color.lerp(accent.withValues(alpha: 0.08), accent.withValues(alpha: 0.14), shimmer)!;
+    final border = Color.lerp(accent.withValues(alpha: 0.16), accent.withValues(alpha: 0.26), shimmer)!;
+    final text = Color.lerp(cs.onSurface.withValues(alpha: 0.60), accent.withValues(alpha: 0.95), shimmer)!;
 
     return Padding(
       padding: const EdgeInsets.only(top: 10),
@@ -1228,11 +1337,7 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _MixDot(
-                      color: accent,
-                      shimmer: shimmer,
-                      phase: widget.phase,
-                    ),
+                    _MixDot(color: accent, shimmer: shimmer),
                     const SizedBox(width: 8),
                     Text(
                       'ghost mixing',
@@ -1244,7 +1349,7 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
                         color: text,
                         shadows: [
                           Shadow(
-                            color: accent.withValues(alpha: 0.25 + 0.35 * shimmer),
+                            color: accent.withValues(alpha: 0.20 + 0.30 * shimmer),
                             blurRadius: 14,
                           ),
                         ],
@@ -1264,30 +1369,23 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
 class _MixDot extends StatelessWidget {
   final Color color;
   final double shimmer;
-  final MixPhase phase;
 
-  const _MixDot({
-    required this.color,
-    required this.shimmer,
-    required this.phase,
-  });
+  const _MixDot({required this.color, required this.shimmer});
 
   @override
   Widget build(BuildContext context) {
-    final t = phase == MixPhase.mixing ? 1.0 : 0.6;
-
-    final alpha = (0.45 + 0.45 * shimmer) * t;
-    final shadowAlpha = (0.20 + 0.35 * shimmer) * t;
+    final alpha = (0.45 + 0.45 * shimmer).clamp(0.0, 1.0);
+    final shadowAlpha = (0.18 + 0.35 * shimmer).clamp(0.0, 1.0);
 
     return Container(
       width: 7,
       height: 7,
       decoration: BoxDecoration(
-        color: color.withValues(alpha: alpha.clamp(0.0, 1.0)),
+        color: color.withValues(alpha: alpha),
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: color.withValues(alpha: shadowAlpha.clamp(0.0, 1.0)),
+            color: color.withValues(alpha: shadowAlpha),
             blurRadius: 12,
             spreadRadius: -4,
           ),
@@ -1314,194 +1412,71 @@ class _PlaybackControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
 
-    return IconTheme(
-      data: IconThemeData(color: cs.onSurface),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _ControlButton(
-            icon: Icons.skip_previous_rounded,
-            size: 56,
-            iconSize: 36,
-            onPressed: onPrevious,
-          ),
-          const SizedBox(width: 16),
-          _PlayPauseMainButton(
-            isPlaying: isPlaying,
-            onPressed: onPlayPause,
-          ),
-          const SizedBox(width: 16),
-          _ControlButton(
-            icon: Icons.skip_next_rounded,
-            size: 56,
-            iconSize: 36,
-            onPressed: onNext,
-          ),
-        ],
-      ),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        IconButton(
+          onPressed: () {
+            HapticFeedback.lightImpact();
+            onPrevious();
+          },
+          icon: const Icon(Icons.skip_previous_rounded),
+          iconSize: 34,
+          color: cs.onSurface.withValues(alpha: 0.90),
+        ),
+        const SizedBox(width: 18),
+        _PlayPauseButton(isPlaying: isPlaying, onPressed: onPlayPause),
+        const SizedBox(width: 18),
+        IconButton(
+          onPressed: () {
+            HapticFeedback.lightImpact();
+            onNext();
+          },
+          icon: const Icon(Icons.skip_next_rounded),
+          iconSize: 34,
+          color: cs.onSurface.withValues(alpha: 0.90),
+        ),
+      ],
     );
   }
 }
 
-class _PlayPauseMainButton extends StatefulWidget {
+class _PlayPauseButton extends StatelessWidget {
   final bool isPlaying;
   final VoidCallback onPressed;
 
-  const _PlayPauseMainButton({
+  const _PlayPauseButton({
     required this.isPlaying,
     required this.onPressed,
   });
 
   @override
-  State<_PlayPauseMainButton> createState() => _PlayPauseMainButtonState();
-}
-
-class _PlayPauseMainButtonState extends State<_PlayPauseMainButton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scaleAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 100),
-    );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.9).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-    );
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
 
     return GestureDetector(
-      onTapDown: (_) => _controller.forward(),
-      onTapUp: (_) => _controller.reverse(),
-      onTapCancel: () => _controller.reverse(),
       onTap: () {
         HapticFeedback.mediumImpact();
-        widget.onPressed();
+        onPressed();
       },
-      child: AnimatedBuilder(
-        animation: _scaleAnimation,
-        builder: (context, child) {
-          return Transform.scale(
-            scale: _scaleAnimation.value,
-            child: child,
-          );
-        },
-        child: Container(
-          width: 80,
-          height: 80,
-          decoration: BoxDecoration(
-            color: cs.primary,
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: cs.primary.withValues(alpha: 0.35),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (child, animation) {
-              return ScaleTransition(
-                scale: animation,
-                child: FadeTransition(opacity: animation, child: child),
-              );
-            },
-            child: Icon(
-              widget.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-              key: ValueKey(widget.isPlaying),
-              size: 44,
-              color: Colors.white,
+      child: Container(
+        width: 86,
+        height: 86,
+        decoration: BoxDecoration(
+          color: cs.primary,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: cs.primary.withValues(alpha: 0.35),
+              blurRadius: 24,
+              offset: const Offset(0, 10),
             ),
-          ),
+          ],
         ),
-      ),
-    );
-  }
-}
-
-class _ControlButton extends StatefulWidget {
-  final IconData icon;
-  final double size;
-  final double iconSize;
-  final VoidCallback onPressed;
-
-  const _ControlButton({
-    required this.icon,
-    required this.size,
-    required this.iconSize,
-    required this.onPressed,
-  });
-
-  @override
-  State<_ControlButton> createState() => _ControlButtonState();
-}
-
-class _ControlButtonState extends State<_ControlButton> with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scaleAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 100),
-    );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.85).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-    );
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    return GestureDetector(
-      onTapDown: (_) => _controller.forward(),
-      onTapUp: (_) => _controller.reverse(),
-      onTapCancel: () => _controller.reverse(),
-      onTap: () {
-        HapticFeedback.lightImpact();
-        widget.onPressed();
-      },
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedBuilder(
-        animation: _scaleAnimation,
-        builder: (context, child) {
-          return Transform.scale(
-            scale: _scaleAnimation.value,
-            child: child,
-          );
-        },
-        child: SizedBox(
-          width: widget.size,
-          height: widget.size,
-          child: Icon(
-            widget.icon,
-            size: widget.iconSize,
-            color: cs.onSurface,
-          ),
+        child: Icon(
+          isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+          size: 44,
+          color: Colors.white,
         ),
       ),
     );
@@ -1536,7 +1511,11 @@ class _TechInfo extends StatelessWidget {
 
 class _SecondaryControls extends StatelessWidget {
   final bool shuffleEnabled;
-  final int repeatMode;
+
+  /// ВАЖНО: не RepeatMode — чтобы не зависеть от твоих моделей.
+  /// Может прийти int/bool/String/enum — мы всё переварим.
+  final Object repeatMode;
+
   final VoidCallback onShuffle;
   final VoidCallback onRepeat;
   final VoidCallback? onOpenQueue;
@@ -1551,95 +1530,127 @@ class _SecondaryControls extends StatelessWidget {
     this.onOpenEqualizer,
   });
 
+  int _repeatIndex(Object mode) {
+    // 0 = off, 1 = all, 2 = one
+
+    // Самый частый вариант: int
+    if (mode is int) {
+      if (mode <= 0) return 0;
+      if (mode == 2) return 2;
+      return 1;
+    }
+
+    // Иногда делают bool: false=off true=all
+    if (mode is bool) return mode ? 1 : 0;
+
+    // Иногда строками
+    if (mode is String) {
+      final v = mode.toLowerCase().trim();
+      if (v == 'off' || v == 'none' || v == '0') return 0;
+      if (v == 'one' || v == 'repeat_one' || v == 'single' || v == '2') return 2;
+      return 1;
+    }
+
+    // Если это enum/объект — пробуем вытащить .name (Dart enum имеет name)
+    try {
+      final name = (mode as dynamic).name?.toString().toLowerCase();
+      if (name == null) return 0;
+      if (name.contains('off') || name.contains('none')) return 0;
+      if (name.contains('one') || name.contains('single')) return 2;
+      // всё остальное считаем "repeat all"
+      return 1;
+    } catch (_) {
+      // на крайняк — считаем выключенным
+      return 0;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final repeatIcon = switch (repeatMode) {
-      1 => Icons.repeat_one_rounded,
-      _ => Icons.repeat_rounded,
-    };
+    final cs = Theme.of(context).colorScheme;
+
+    final idx = _repeatIndex(repeatMode);
+    final repeatIsActive = idx != 0;
+    final repeatIcon = (idx == 2) ? Icons.repeat_one_rounded : Icons.repeat_rounded;
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        _SecondaryButton(
+        _SmallToggleButton(
           icon: Icons.shuffle_rounded,
-          isActive: shuffleEnabled,
-          onPressed: onShuffle,
-          tooltip: 'Перемешать',
+          active: shuffleEnabled,
+          onTap: onShuffle,
+          activeColor: cs.primary,
         ),
         const SizedBox(width: 14),
-        _SecondaryButton(
+        _SmallToggleButton(
           icon: repeatIcon,
-          isActive: repeatMode != 0,
-          onPressed: onRepeat,
-          tooltip: 'Повтор',
+          active: repeatIsActive,
+          onTap: onRepeat,
+          activeColor: cs.primary,
         ),
         const SizedBox(width: 14),
-        _SecondaryButton(
+        _SmallToggleButton(
           icon: Icons.tune_rounded,
-          isActive: false,
-          onPressed: onOpenEqualizer,
-          tooltip: 'Эквалайзер',
+          active: false,
+          onTap: onOpenEqualizer,
+          activeColor: cs.primary,
         ),
         const SizedBox(width: 14),
-        _SecondaryButton(
+        _SmallToggleButton(
           icon: Icons.queue_music_rounded,
-          isActive: false,
-          onPressed: onOpenQueue,
-          tooltip: 'Очередь',
+          active: false,
+          onTap: onOpenQueue,
+          activeColor: cs.primary,
         ),
       ],
     );
   }
 }
 
-class _SecondaryButton extends StatelessWidget {
-  final IconData icon;
-  final bool isActive;
-  final VoidCallback? onPressed;
-  final String tooltip;
 
-  const _SecondaryButton({
+class _SmallToggleButton extends StatelessWidget {
+  final IconData icon;
+  final bool active;
+  final VoidCallback? onTap;
+  final Color activeColor;
+
+  const _SmallToggleButton({
     required this.icon,
-    required this.isActive,
-    required this.onPressed,
-    required this.tooltip,
+    required this.active,
+    required this.onTap,
+    required this.activeColor,
   });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final enabled = onPressed != null;
 
-    final bgColor = isActive ? cs.primary.withValues(alpha: 0.15) : Colors.transparent;
+    final enabled = onTap != null;
+    final iconColor = active
+        ? activeColor
+        : enabled
+            ? cs.onSurface.withValues(alpha: 0.75)
+            : cs.onSurface.withValues(alpha: 0.35);
 
-    final iconColor = isActive
-        ? cs.primary
-        : (enabled ? cs.onSurface.withValues(alpha: 0.75) : cs.onSurface.withValues(alpha: 0.35));
+    final bg = active ? activeColor.withValues(alpha: 0.14) : Colors.transparent;
 
-    return Tooltip(
-      message: tooltip,
-      child: GestureDetector(
-        onTap: enabled
-            ? () {
-                HapticFeedback.selectionClick();
-                onPressed?.call();
-              }
-            : null,
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Icon(
-            icon,
-            size: 24,
-            color: iconColor,
-          ),
+    return GestureDetector(
+      onTap: enabled
+          ? () {
+              HapticFeedback.selectionClick();
+              onTap?.call();
+            }
+          : null,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: AppDuration.fast,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(12),
         ),
+        child: Icon(icon, size: 24, color: iconColor),
       ),
     );
   }

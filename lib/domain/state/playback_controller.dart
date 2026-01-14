@@ -1,3 +1,21 @@
+// playback_controller.dart
+//
+// Ghost Music — PlaybackController (Riverpod StateNotifier)
+// Архитектура:
+// - Один публичный PlaybackController управляет PlaybackState.
+// - Два "дека" (_PlaybackDeck): A и B. Это нужно для Automix (параллельное воспроизведение).
+// - На Windows можно использовать MediaKit (mpv) как backend (для форматов/эффектов/анализатора).
+// - На iOS/Android MediaKit НЕ ДОЛЖЕН ВКЛЮЧАТЬСЯ (иначе будет Mpv.framework error и зависания).
+// - Все операции идут через _enqueue (последовательная очередь), чтобы не было гонок.
+//   Поэтому важно: НИГДЕ не допускать await, который может подвиснуть навсегда.
+//   Для этого все критичные вызовы обёрнуты в timeout.
+//
+// ВАЖНО: этот файл можно просто заменить целиком.
+// Он сохраняет твою логику/механику, но:
+// 1) Жёстко запрещает MediaKit на iOS/Android (и даже в fallback после ошибки).
+// 2) Добавляет таймауты на опасные места (AudioSession setActive, setAudioSource/open/play/seek…).
+// 3) Убирает искусственный запрет на .cue (ты сказал, что у тебя CUE реально воспроизводятся).
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -70,8 +88,7 @@ final trackArtworkPathProvider = FutureProvider.autoDispose.family<String?, Stri
   return null;
 });
 
-/// Same as [trackArtworkPathProvider], but kept for compatibility with older
-/// callsites.
+/// Same as [trackArtworkPathProvider], but kept for compatibility with older callsites.
 final trackArtworkPathProviderCompat = trackArtworkPathProvider;
 
 final playbackControllerProvider = StateNotifierProvider<PlaybackController, PlaybackState>((ref) {
@@ -100,40 +117,42 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     // Start with empty queue; user selects tracks from library.
   }
-  
-  // --- iOS Now Playing / Remote Controls ---
-  
+
+  // ===========================================================================
+  // iOS Now Playing / Remote Controls (audio_service)
+  // ===========================================================================
+
   void _initAudioHandler() {
     final handler = GhostAudioHandler.instance;
     if (handler == null) return;
-    
-    // Bind remote command callbacks
+
     handler.onPlay = () => togglePlayPause();
     handler.onPause = () => togglePlayPause();
     handler.onSkipToNext = () => next();
     handler.onSkipToPrevious = () => previous();
     handler.onSeek = (position) => seek(position);
+
     handler.onStop = () {
       _enqueue(() async {
         await _activeDeck.pause();
         await _activeDeck.seek(Duration.zero);
         state = state.copyWith(isPlaying: false, position: Duration.zero);
+        _updatePlaybackStateForHandler();
       });
     };
   }
-  
+
   /// Update Now Playing info for iOS Control Center / Lock Screen.
   Future<void> _updateNowPlaying() async {
     final handler = GhostAudioHandler.instance;
     if (handler == null) return;
-    
+
     final track = state.currentTrack;
     if (track == null) {
       handler.updateStopped();
       return;
     }
-    
-    // Try to get artwork URI
+
     Uri? artUri;
     try {
       final artworkPath = await _resolveArtworkPath(track.filePath);
@@ -141,9 +160,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         artUri = Uri.file(artworkPath);
       }
     } catch (_) {
-      // Artwork lookup failed, continue without it
+      // ignore
     }
-    
+
     handler.updateNowPlaying(
       title: track.displayTitle,
       artist: track.artist,
@@ -153,42 +172,39 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       trackId: track.filePath,
     );
   }
-  
+
   /// Resolve artwork path for Now Playing (simpler version of trackArtworkPathProvider).
   Future<String?> _resolveArtworkPath(String trackPath) async {
-    // Check user override
     final override = await CoverArtService.getOverrideForFile(trackPath);
     if (override != null) return override;
-    
-    // Check embedded artwork cache
+
     try {
       final tmp = await getApplicationSupportDirectory();
       final base = p.join(tmp.path, 'artwork_cache');
       final hash = trackPath.hashCode;
-      
+
       final jpg = File(p.join(base, 'art_$hash.jpg'));
       if (await jpg.exists()) return jpg.path;
-      
+
       final png = File(p.join(base, 'art_$hash.png'));
       if (await png.exists()) return png.path;
     } catch (_) {}
-    
-    // Check folder artwork
+
     final dirPath = p.dirname(trackPath);
-    const candidates = ['cover.jpg', 'cover.png', 'folder.jpg', 'folder.png'];
+    const candidates = ['cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'front.jpg', 'front.png'];
     for (final name in candidates) {
       final file = File(p.join(dirPath, name));
       if (await file.exists()) return file.path;
     }
-    
+
     return null;
   }
-  
+
   /// Update iOS playback state (position, playing status).
   void _updatePlaybackStateForHandler() {
     final handler = GhostAudioHandler.instance;
     if (handler == null) return;
-    
+
     handler.updatePlaybackState(
       playing: state.isPlaying,
       position: state.position,
@@ -197,7 +213,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     );
   }
 
-  // --- Preferences ---
+  // ===========================================================================
+  // Preferences
+  // ===========================================================================
 
   static const _prefsAutomixEnabled = 'automix_enabled';
   static const _prefsAutomixProfile = 'automix_profile';
@@ -205,11 +223,13 @@ class PlaybackController extends StateNotifier<PlaybackState> {
   static const _prefsAutomixEq = 'automix_eq';
   static const _prefsAutomixMaxTempoDelta = 'automix_max_tempo_delta';
 
-  // Kept for backward compatibility (older builds used explicit seconds).
+  // Kept for backward compatibility (older builds used explicit ms).
   static const _prefsAutomixCrossfadeMs = 'automix_crossfade_ms';
   static const _prefsAutomixPreRollMs = 'automix_preroll_ms';
 
-  // --- Decks ---
+  // ===========================================================================
+  // Decks
+  // ===========================================================================
 
   late final _PlaybackDeck _deckA;
   late final _PlaybackDeck _deckB;
@@ -217,9 +237,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
   _PlaybackDeck get _inactiveDeck => identical(_activeDeck, _deckA) ? _deckB : _deckA;
 
-  // --- Playback ---
-
-  bool _handlingCompletion = false;
+  // ===========================================================================
+  // Serial operation queue (важно: не допускаем "вечных await")
+  // ===========================================================================
 
   Future<void> _opChain = Future.value();
   int _setQueueToken = 0;
@@ -239,7 +259,82 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     return completer.future;
   }
 
-  // --- Automix ---
+  // ===========================================================================
+  // AudioSession init / activation (iOS критично!)
+  // ===========================================================================
+
+  Future<void> _initAudio() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration.music());
+
+      session.interruptionEventStream.listen((event) {
+        if (event.begin) {
+          if (state.isPlaying) {
+            unawaited(_enqueue(() async {
+              await _activeDeck.pause();
+            }));
+          }
+        }
+      });
+    } catch (e) {
+      debugPrint('AudioSession init failed: $e');
+    }
+  }
+
+  /// На iOS бывает, что setActive может подвисать в некоторых состояниях.
+  /// Поэтому обязательно timeout.
+  Future<void> _activateSession() async {
+  try {
+    final session = await AudioSession.instance;
+
+    // setActive возвращает Future<bool>, поэтому onTimeout обязан вернуть bool
+    final ok = await session
+        .setActive(true)
+        .timeout(const Duration(seconds: 1), onTimeout: () => false);
+
+    if (!ok) {
+      debugPrint('AudioSession setActive(true) returned false');
+    }
+  } catch (e) {
+    debugPrint('AudioSession activate failed: $e');
+  }
+}
+
+
+  // ===========================================================================
+  // Playback helpers
+  // ===========================================================================
+
+  /// Возвращает причину, если файл не должен играть.
+  /// ВАЖНО: .cue мы НЕ блокируем, потому что ты сказал, что у тебя оно реально воспроизводится.
+  String? _playbackUnsupportedReason(String filePath) {
+    if (Platform.isWindows && filePath.length > 240) {
+      // Windows long path обычно ок, но оставим как было (не блокируем).
+      return null;
+    }
+
+    try {
+      if (!File(filePath).existsSync()) {
+        return 'Файл не найден: $filePath';
+      }
+    } catch (_) {
+      return null;
+    }
+
+    return null;
+  }
+
+  /// Мы разрешаем MediaKit ТОЛЬКО на Windows.
+  bool _shouldUseMediaKitForPath(String filePath) {
+    return Platform.isWindows;
+  }
+
+  // ===========================================================================
+  // Automix core
+  // ===========================================================================
+
+  bool _handlingCompletion = false;
 
   final _AutomixTailAnalyzer _tailAnalyzer = _AutomixTailAnalyzer();
 
@@ -272,7 +367,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       final eq = prefs.getBool(_prefsAutomixEq);
       final maxTempoDelta = prefs.getDouble(_prefsAutomixMaxTempoDelta);
 
-      // Legacy values (ignored by UI; may act as hint if user had older version).
       final legacyPreRollMs = prefs.getInt(_prefsAutomixPreRollMs);
       final legacyCrossfadeMs = prefs.getInt(_prefsAutomixCrossfadeMs);
 
@@ -285,7 +379,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         automixPreRoll: legacyPreRollMs == null
             ? state.automixPreRoll
             : _clampPreRoll(Duration(milliseconds: legacyPreRollMs)),
-        // Keep in state for UI; if legacy was present, show it until we plan a real transition.
         automixCrossfade: legacyCrossfadeMs == null
             ? state.automixCrossfade
             : _clampLegacyCrossfade(Duration(milliseconds: legacyCrossfadeMs)),
@@ -323,7 +416,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
   double _clampTempoDelta(double value) {
     final clamped = value.clamp(0.0, 0.12);
-    // Avoid NaN propagation.
     if (clamped.isNaN || !clamped.isFinite) return 0.06;
     return clamped;
   }
@@ -402,7 +494,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     });
   }
 
-  // --- Deck bindings ---
+  // ===========================================================================
+  // Deck bindings -> PlaybackState
+  // ===========================================================================
 
   DateTime? _lastHandlerUpdate;
 
@@ -413,7 +507,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     if (state.isPlaying != overall) {
       state = state.copyWith(isPlaying: overall);
-      // Update iOS Now Playing state
       _updatePlaybackStateForHandler();
     }
   }
@@ -423,11 +516,10 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     state = state.copyWith(position: position);
     _maybeScheduleAutomix();
-    
-    // Throttle iOS handler updates to ~1Hz to avoid excessive updates
+
+    // Throttle iOS handler updates to ~1Hz
     final now = DateTime.now();
-    if (_lastHandlerUpdate == null || 
-        now.difference(_lastHandlerUpdate!) >= const Duration(milliseconds: 1000)) {
+    if (_lastHandlerUpdate == null || now.difference(_lastHandlerUpdate!) >= const Duration(milliseconds: 1000)) {
       _lastHandlerUpdate = now;
       _updatePlaybackStateForHandler();
     }
@@ -435,8 +527,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
   void _onDeckDuration(_PlaybackDeck deck, Duration? duration) {
     if (!identical(deck, _activeDeck)) return;
+
     state = state.copyWith(currentDuration: duration);
-    // Update Now Playing when duration becomes known
+
     if (duration != null) {
       unawaited(_updateNowPlaying());
     }
@@ -448,66 +541,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     unawaited(_enqueue(() => _handleCompleted()));
   }
 
-  // --- Playback helpers ---
-
-  String? _playbackUnsupportedReason(String filePath) {
-    final ext = p.extension(filePath).toLowerCase();
-    if (ext == '.cue') {
-      return 'CUE-файл не является аудио: нужен импорт/разбиение на треки';
-    }
-
-    if (Platform.isWindows && filePath.length > 240) {
-      return null;
-    }
-
-    try {
-      if (!File(filePath).existsSync()) {
-        return 'Файл не найден: $filePath';
-      }
-    } catch (_) {
-      return null;
-    }
-
-    return null;
-  }
-
-  bool _shouldUseMediaKitForPath(String filePath) {
-    if (Platform.isWindows) return true;
-    return false;
-  }
-
-  Future<void> _initAudio() async {
-    try {
-      final session = await AudioSession.instance;
-      // Use standard music configuration - works reliably on iOS
-      await session.configure(const AudioSessionConfiguration.music());
-      
-      // Listen to interruptions to handle phone calls, etc.
-      session.interruptionEventStream.listen((event) {
-        if (event.begin) {
-          // Interruption started (e.g., phone call)
-          if (state.isPlaying) {
-            unawaited(_enqueue(() async {
-              await _activeDeck.pause();
-            }));
-          }
-        }
-      });
-    } catch (e) {
-      debugPrint('AudioSession init failed: $e');
-    }
-  }
-
-  Future<void> _activateSession() async {
-    try {
-      final session = await AudioSession.instance;
-      await session.setActive(true);
-    } catch (e) {
-      debugPrint('AudioSession activate failed: $e');
-    }
-  }
-
-  // --- Automix planner ---
+  // ===========================================================================
+  // Automix planner
+  // ===========================================================================
 
   void _maybeScheduleAutomix() {
     if (!state.automixEnabled) return;
@@ -519,6 +555,7 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     if (currentIndex == null || duration == null) return;
     if (state.queue.length < 2) return;
 
+    // repeatMode: 0 off, 1 repeat one, 2 repeat all (как у тебя)
     if (state.repeatMode == 1) {
       if (state.mixPhase != MixPhase.off) {
         unawaited(_enqueue(_abortAutomix));
@@ -532,8 +569,7 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     final remaining = duration - state.position;
 
-    // Start planning & tail-analysis only once we are inside the last ~minute.
-    // This avoids doing heavy work early and matches the DJ expectation.
+    // Планируем ближе к концу
     if (remaining > const Duration(seconds: 75)) {
       return;
     }
@@ -552,12 +588,10 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       if (state.mixPhase == MixPhase.preparing && _preparedPlan?.key == plan.key) {
         unawaited(_enqueue(_startMixIfReady));
       } else if (state.mixPhase == MixPhase.off) {
-        unawaited(
-          _enqueue(() async {
-            await _prepareAutomix(plan);
-            await _startMixIfReady();
-          }),
-        );
+        unawaited(_enqueue(() async {
+          await _prepareAutomix(plan);
+          await _startMixIfReady();
+        }));
       }
       return;
     }
@@ -580,11 +614,8 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
   Duration _preloadWindowForPlan(_AutomixPlan plan) {
     final base = state.automixPreRoll;
-
-    // Heuristic: longer mixes need more pre-roll to avoid late decoding hiccups.
     final extra = plan.mixDuration ~/ 3;
     final desired = base + extra;
-
     final ms = desired.inMilliseconds.clamp(4000, 16000);
     return Duration(milliseconds: ms);
   }
@@ -597,21 +628,18 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final from = state.queue[currentIndex];
     final to = state.queue[nextIndex];
 
-    final key = '${from.uniqueKey}|${to.uniqueKey}|${duration.inMilliseconds}|${state.automixProfile}|'
-        '${state.automixBeatmatch}|${state.automixEq}|${state.automixMaxTempoDelta}';
+    final key =
+        '${from.uniqueKey}|${to.uniqueKey}|${duration.inMilliseconds}|${state.automixProfile}|${state.automixBeatmatch}|${state.automixEq}|${state.automixMaxTempoDelta}';
 
     if (_plannedPlanKey == key) return;
 
     final inFlightKey = _planInFlightKey;
     final inFlight = _planInFlight;
-
     if (inFlightKey == key && inFlight != null) return;
 
     final token = ++_planToken;
-
     _planInFlightKey = key;
 
-    // Fire & forget: planning must never block playback controls.
     final future = _computeAutomixPlan(
       fromIndex: currentIndex,
       toIndex: nextIndex,
@@ -640,16 +668,12 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     Duration? analyzedExit;
     try {
-      analyzedExit = await _tailAnalyzer
-          .findExitPoint(from, duration)
-          .timeout(const Duration(seconds: 4));
+      analyzedExit = await _tailAnalyzer.findExitPoint(from, duration).timeout(const Duration(seconds: 4));
     } catch (_) {
       analyzedExit = null;
     }
 
     if (token != _planToken) return;
-
-    // Track changed while we were analyzing.
     if (state.currentIndex != fromIndex) return;
 
     final plan = _buildAutomixPlan(
@@ -666,7 +690,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     _plannedPlan = plan;
     _plannedPlanKey = key;
 
-    // Expose planned mix duration to UI (purely informational).
     if (state.automixCrossfade != plan.mixDuration && state.mixPhase == MixPhase.off) {
       state = state.copyWith(automixCrossfade: plan.mixDuration);
     }
@@ -686,7 +709,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final bpmTo = to.bpm;
     final bpmRef = bpmFrom ?? bpmTo;
 
-    // Keep the transition musically aligned (bar grid) when BPM is known.
     final exit = (bpmRef == null || bpmRef <= 0) ? rawExit : _alignDownToBar(rawExit, bpmRef);
 
     final mixDuration = _autoMixDuration(
@@ -724,11 +746,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
   Duration _pickExitTime({required Duration? exitTime, required Duration duration}) {
     if (exitTime == null) return duration;
 
-    // We only consider analysis in the last minute.
     final lowerBound = duration - const Duration(minutes: 1);
     if (exitTime < lowerBound) return duration;
 
-    // Too close to the end: doesn't help.
     if (duration - exitTime < const Duration(seconds: 3)) return duration;
 
     return exitTime;
@@ -751,7 +771,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     required Duration duration,
     required Duration exit,
   }) {
-    // Default values when BPM is unknown.
     final defaultSeconds = profile == AutomixProfile.club ? 8 : 12;
 
     if (bpmRef == null || bpmRef <= 0) {
@@ -762,7 +781,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final beatMs = (60000.0 / bpmRef).round();
     final barMs = beatMs * 4;
 
-    // Target number of bars depends on style and track length.
     var targetBars = switch (profile) {
       AutomixProfile.club => 4,
       AutomixProfile.smooth => 8,
@@ -782,7 +800,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     targetBars = targetBars.clamp(minBars, maxBars);
 
-    // Keep it musically aligned: even number of bars.
     if (targetBars > 1 && targetBars.isOdd) {
       targetBars = math.min(maxBars, targetBars + 1);
       if (targetBars.isOdd) targetBars = math.max(minBars, targetBars - 1);
@@ -790,13 +807,11 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     var ms = targetBars * barMs;
 
-    // Never exceed the available outro window.
     final maxAllowed = exit.inMilliseconds.clamp(0, 1 << 30);
     if (ms > maxAllowed) {
       ms = maxAllowed;
     }
 
-    // Guard.
     ms = ms.clamp(2000, 20000);
     return Duration(milliseconds: ms);
   }
@@ -847,7 +862,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     if (!state.automixEnabled) return;
     if (state.mixPhase == MixPhase.mixing) return;
 
-    // Avoid cross-contamination if user is rapidly skipping.
     _cancelRateReturn();
 
     _preparedPlan = plan;
@@ -859,7 +873,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final preferMediaKit = _shouldUseMediaKitForPath(nextTrack.filePath);
 
     try {
-      // Prepare incoming deck.
       await _inactiveDeck.pause();
       await _inactiveDeck.seek(Duration.zero);
       await _inactiveDeck.setVolume(1.0);
@@ -873,11 +886,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         activateSession: _activateSession,
       );
 
-      // Beatmatch + cue.
       await _inactiveDeck.setRate(plan.incomingRate);
       await _inactiveDeck.seek(plan.incomingCue);
 
-      // DJ-EQ: start with incoming bass cut.
       if (state.automixEq) {
         await _inactiveDeck.setHighPassHz(plan.bassCutHz);
         await _activeDeck.setHighPassHz(null);
@@ -910,7 +921,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final incoming = _inactiveDeck;
 
     _activeMixPlan = plan;
-
     state = state.copyWith(mixPhase: MixPhase.mixing, mixProgress01: 0.0);
 
     _stopMixTimer();
@@ -966,7 +976,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final elapsed = _mixElapsed + DateTime.now().difference(startedAt);
     final t = (elapsed.inMilliseconds / durationMs).clamp(0.0, 1.0);
 
-    // Equal-power crossfade.
     final toVol = math.sin(t * math.pi / 2);
     final fromVol = math.cos(t * math.pi / 2);
 
@@ -990,11 +999,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
   void _applyDjEqIfNeeded({required _AutomixPlan plan, required double t}) {
     if (!state.automixEq) return;
 
-    // Only meaningful on MediaKit backend; just_audio falls back silently.
     final hz = plan.bassCutHz;
     if (hz <= 0) return;
 
-    // Bass swap timing differs per profile.
     final (swapStart, swapEnd) = switch (plan.profile) {
       AutomixProfile.smooth => (0.35, 0.78),
       AutomixProfile.club => (0.50, 0.68),
@@ -1006,7 +1013,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final outHz = hz * eased;
     final inHz = hz * (1.0 - eased);
 
-    // Throttle EQ updates.
     if ((_lastEqOutHz - outHz).abs() > 6) {
       _lastEqOutHz = outHz;
       unawaited(_activeDeck.setHighPassHz(outHz <= 4 ? null : outHz));
@@ -1033,10 +1039,7 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     _cancelRateReturn();
 
-    final duration = profile == AutomixProfile.club
-        ? const Duration(seconds: 8)
-        : const Duration(seconds: 12);
-
+    final duration = profile == AutomixProfile.club ? const Duration(seconds: 8) : const Duration(seconds: 12);
     final start = DateTime.now();
 
     _rateReturnTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
@@ -1072,7 +1075,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     final outgoing = _activeDeck;
     final incoming = _inactiveDeck;
 
-    // Reset FX on outgoing first (avoid leaving filters behind).
     try {
       await outgoing.setHighPassHz(null);
       await outgoing.setRate(1.0);
@@ -1094,7 +1096,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       await outgoing.setVolume(1.0);
     } catch (_) {}
 
-    // Incoming becomes active.
     try {
       await incoming.setVolume(1.0);
       await incoming.setHighPassHz(null);
@@ -1112,7 +1113,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       lastError: null,
     );
 
-    // Bring tempo back to normal after the transition.
     if (state.automixBeatmatch) {
       _scheduleRateReturn(deck: _activeDeck, fromRate: plan.incomingRate, profile: plan.profile);
     } else {
@@ -1126,6 +1126,10 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
     _mixElapsed = Duration.zero;
     _mixStartedAt = null;
+
+    // Now Playing обновим на входящий трек
+    unawaited(_updateNowPlaying());
+    _updatePlaybackStateForHandler();
   }
 
   Future<void> _abortAutomix() async {
@@ -1146,7 +1150,7 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     _lastEqOutHz = -1;
     _lastEqInHz = -1;
 
-    // Use timeout to prevent hanging on iOS when player is in bad state
+    // timeouts — чтобы не подвисать на iOS при плохих состояниях
     const timeout = Duration(milliseconds: 500);
 
     try {
@@ -1168,7 +1172,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     }
   }
 
-  // --- End of track ---
+  // ===========================================================================
+  // End of track
+  // ===========================================================================
 
   Future<void> _handleCompleted() async {
     if (_handlingCompletion) return;
@@ -1193,6 +1199,7 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         } catch (_) {}
 
         state = state.copyWith(isPlaying: false, position: Duration.zero);
+        _updatePlaybackStateForHandler();
         return;
       }
 
@@ -1237,8 +1244,8 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     if (autoplay) {
       state = state.copyWith(isPlaying: _activeDeck.lastPlaying);
     }
-    
-    // Update iOS Now Playing with new track info
+
+    // iOS Now Playing
     unawaited(_updateNowPlaying());
     _updatePlaybackStateForHandler();
   }
@@ -1264,7 +1271,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         if (!allowWrap && index == length - 1) {
           break;
         }
-
         index = (index + 1) % length;
       }
     }
@@ -1272,13 +1278,16 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     throw Exception(state.lastError ?? 'Не удалось воспроизвести трек');
   }
 
-  // --- Public API ---
+  // ===========================================================================
+  // Public API
+  // ===========================================================================
 
   Future<void> setQueue(List<Track> queue, {int startIndex = 0, bool autoplay = false}) {
     final token = ++_setQueueToken;
-    
-    glog.playback('setQueue', 
-      queueLength: queue.length, 
+
+    glog.playback(
+      'setQueue',
+      queueLength: queue.length,
       queueIndex: startIndex,
       extra: {'autoplay': autoplay},
     );
@@ -1310,9 +1319,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         try {
           await _inactiveDeck.pause();
         } catch (_) {}
-        
-        // Update iOS handler with stopped state
+
         GhostAudioHandler.instance?.updateStopped();
+        _updatePlaybackStateForHandler();
 
         return;
       }
@@ -1331,7 +1340,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         if (i == safeIndex) {
           initialIndex = playable.length;
         }
-
         playable.add(track);
       }
 
@@ -1356,9 +1364,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     });
   }
 
-  /// Adds a track to the end of the current queue.
-  ///
-  /// If there is no active playlist yet, this will create a new queue.
   Future<void> addToQueueEnd(Track track, {bool autoplayIfEmpty = false}) {
     return _enqueue(() async {
       final reason = _playbackUnsupportedReason(track.filePath);
@@ -1368,7 +1373,7 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       }
 
       if (state.queue.isEmpty) {
-        // Don't await to avoid deadlock inside _enqueue.
+        // avoid deadlock inside _enqueue
         setQueue([track], startIndex: 0, autoplay: autoplayIfEmpty);
         return;
       }
@@ -1378,7 +1383,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     });
   }
 
-  /// Inserts a track right after the current one (Poweramp-like "Play Next").
   Future<void> playNext(Track track) async {
     final reason = _playbackUnsupportedReason(track.filePath);
     if (reason != null) {
@@ -1397,15 +1401,12 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     try {
       final updated = [...state.queue];
       updated.insert(insertIndex, track);
-
-      // Keep currently playing item as-is.
       state = state.copyWith(queue: updated);
     } catch (e) {
       debugPrint('playNext failed: $e');
     }
   }
 
-  /// Removes an item from the queue.
   Future<void> removeFromQueue(int index) async {
     if (index < 0 || index >= state.queue.length) return;
 
@@ -1438,10 +1439,11 @@ class PlaybackController extends StateNotifier<PlaybackState> {
           await _activeDeck.pause();
         } catch (_) {}
         state = state.copyWith(position: Duration.zero, currentDuration: null, isPlaying: false);
+        GhostAudioHandler.instance?.updateStopped();
+        _updatePlaybackStateForHandler();
         return;
       }
 
-      // If we removed the currently playing item, load the new current.
       if (current == index) {
         await _loadWithFallback(nextIndex, autoplay: wasPlaying);
       }
@@ -1479,6 +1481,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
         debugPrint('togglePlayPause failed: $e');
         state = state.copyWith(isPlaying: !state.isPlaying, lastError: e.toString());
       }
+
+      // На iOS важно обновлять state в handler
+      _updatePlaybackStateForHandler();
     });
   }
 
@@ -1525,13 +1530,13 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       _plannedPlan = null;
       _plannedPlanKey = null;
 
-      // Poweramp-like behavior: if position > ~3s, restart current track.
       if (state.position.inSeconds >= 3) {
         try {
           await _activeDeck.seek(Duration.zero);
         } catch (_) {}
 
         state = state.copyWith(position: Duration.zero);
+        _updatePlaybackStateForHandler();
         return;
       }
 
@@ -1561,6 +1566,7 @@ class PlaybackController extends StateNotifier<PlaybackState> {
 
       final clampedMs = position.inMilliseconds.clamp(0, d.inMilliseconds);
       state = state.copyWith(position: Duration(milliseconds: clampedMs));
+      _updatePlaybackStateForHandler();
     });
   }
 
@@ -1609,8 +1615,6 @@ class PlaybackController extends StateNotifier<PlaybackState> {
     if (length <= 0) return 0;
 
     if (state.shuffleEnabled) {
-      // Simple shuffle: pick next index deterministically-ish.
-      // (Real shuffle history will come later.)
       return (current + 1) % length;
     }
 
@@ -1647,6 +1651,10 @@ class PlaybackController extends StateNotifier<PlaybackState> {
   }
 }
 
+// ============================================================================
+// Automix plan / analyzer (Windows only)
+// ============================================================================
+
 class _AutomixPlan {
   final int fromIndex;
   final int toIndex;
@@ -1682,7 +1690,6 @@ class _AutomixTailAnalyzer {
   final Map<String, Future<_TailAnalysis?>> _inFlight = <String, Future<_TailAnalysis?>>{};
 
   Future<Duration?> findExitPoint(Track track, Duration duration) async {
-    // MediaKit log-based analysis is currently only used on Windows.
     if (!Platform.isWindows) return null;
 
     final key = track.uniqueKey;
@@ -1710,7 +1717,6 @@ class _AutomixTailAnalyzer {
 
   Future<_TailAnalysis?> _scanTail(Track track, Duration duration) async {
     try {
-      // Guard: if duration is not valid, don't analyze.
       if (duration.inMilliseconds <= 0) return null;
 
       final filePath = track.filePath;
@@ -1769,28 +1775,18 @@ class _AutomixTailAnalyzer {
       });
 
       try {
-        // Disable audio output entirely (best effort).
         try {
           final dynamic platform = player.platform;
           await platform.setProperty('ao', 'null');
-        } catch (_) {
-          // ignore
-        }
+        } catch (_) {}
 
-        // Enable silence detection filter.
         try {
           final dynamic platform = player.platform;
           await platform.setProperty('af', 'lavfi=[silencedetect=n=-36dB:d=0.45]');
-        } catch (_) {
-          // ignore
-        }
+        } catch (_) {}
 
         await player.open(
-          mk.Media(
-            Uri.file(track.filePath).toString(),
-            start: track.start,
-            end: track.end,
-          ),
+          mk.Media(Uri.file(track.filePath).toString(), start: track.start, end: track.end),
           play: false,
         );
 
@@ -1798,7 +1794,6 @@ class _AutomixTailAnalyzer {
             ? Duration.zero
             : (duration - const Duration(minutes: 1));
 
-        // Scan quickly.
         const scanRate = 6.0;
 
         try {
@@ -1811,7 +1806,6 @@ class _AutomixTailAnalyzer {
 
         await player.play();
 
-        // Scan duration depends on how much tail exists.
         final tailLen = duration - tailStart;
         final scanMs = (tailLen.inMilliseconds / scanRate).ceil();
         final scanDuration = Duration(milliseconds: (scanMs + 250).clamp(250, 12000));
@@ -1822,10 +1816,8 @@ class _AutomixTailAnalyzer {
           await player.pause();
         } catch (_) {}
 
-        // Close segment if it runs until the end.
         flushOpenSegment(end: duration);
 
-        // Pick best exit point.
         final threshold = const Duration(milliseconds: 900);
         final lowerBound = duration - const Duration(minutes: 1);
 
@@ -1839,9 +1831,7 @@ class _AutomixTailAnalyzer {
           return const _TailAnalysis(exitTime: null);
         }
 
-        // Prefer the latest silence start near the end.
         candidates.sort((a, b) => b.start.compareTo(a.start));
-
         return _TailAnalysis(exitTime: candidates.first.start);
       } finally {
         await logSub.cancel();
@@ -1856,27 +1846,32 @@ class _AutomixTailAnalyzer {
 
 class _TailAnalysis {
   final Duration? exitTime;
-
   const _TailAnalysis({required this.exitTime});
 }
 
 class _SilenceSegment {
   final Duration start;
   final Duration end;
-
   const _SilenceSegment({required this.start, required this.end});
-
   Duration get duration => end - start;
 }
 
+// ============================================================================
+// _PlaybackDeck — единый слой управления backend'ами
+// ВАЖНО: MediaKit разрешён ТОЛЬКО на Windows.
+// На iOS/Android — строго just_audio.
+// ============================================================================
+
 class _PlaybackDeck {
   final AudioPlayer _player = AudioPlayer();
-
   mk.Player? _mkPlayer;
 
   final List<StreamSubscription<dynamic>> _subscriptions = <StreamSubscription<dynamic>>[];
 
   bool _useMediaKit = false;
+
+  // ВАЖНО: MediaKit только Windows.
+  bool get _allowMediaKit => Platform.isWindows;
 
   double _volume01 = 1.0;
   double _lastSentVolume01 = -1;
@@ -1938,6 +1933,10 @@ class _PlaybackDeck {
   }
 
   Future<void> _ensureMediaKit() async {
+    if (!_allowMediaKit) {
+      // Никогда не инициализируем MediaKit на iOS/Android.
+      return;
+    }
     if (_mkPlayer != null) return;
 
     mk.MediaKit.ensureInitialized();
@@ -1956,9 +1955,7 @@ class _PlaybackDeck {
       final dynamic platform = player.platform;
       await platform.setProperty('cache', 'yes');
       await platform.setProperty('cache-on-disk', 'no');
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
 
     _mkPlayer = player;
 
@@ -2022,57 +2019,83 @@ class _PlaybackDeck {
     required bool preferMediaKit,
     required Future<void> Function() activateSession,
   }) async {
-    if (preferMediaKit) {
+    // ---------------------------
+    // 0) ЖЁСТКИЙ ГАРАНТ: на не-Windows MediaKit запрещён.
+    // ---------------------------
+    if (!_allowMediaKit) {
+      _useMediaKit = false;
+      preferMediaKit = false;
+    }
+
+    // ---------------------------
+    // 1) Если preferMediaKit и можно — пробуем MediaKit.
+    // ---------------------------
+    if (preferMediaKit && _allowMediaKit) {
       _useMediaKit = true;
 
       try {
-        await _player.pause();
+        await _player.pause().timeout(const Duration(milliseconds: 800), onTimeout: () {});
       } catch (_) {}
 
       await _ensureMediaKit();
 
       final player = _mkPlayer;
-      if (player == null) throw Exception('MediaKit init failed');
-
-      try {
-        if (autoplay) {
-          await activateSession();
-        }
-        await player.open(_mediaForTrack(track), play: autoplay);
-        await setVolume(_volume01);
-        await setRate(_rate);
-        await setHighPassHz(_highPassHz);
-        return;
-      } catch (_) {
+      if (player == null) {
         _useMediaKit = false;
+      } else {
+        try {
+          if (autoplay) {
+            await activateSession();
+          }
+
+          await player.open(_mediaForTrack(track), play: autoplay).timeout(const Duration(seconds: 3), onTimeout: () {});
+          await setVolume(_volume01);
+          await setRate(_rate);
+          await setHighPassHz(_highPassHz);
+          return;
+        } catch (_) {
+          _useMediaKit = false; // fallback to just_audio
+        }
       }
     }
 
+    // ---------------------------
+    // 2) Основной путь: just_audio
+    // ---------------------------
     _useMediaKit = false;
 
     try {
-      await _mkPlayer?.pause();
+      await _mkPlayer?.pause().timeout(const Duration(milliseconds: 800), onTimeout: () {});
     } catch (_) {}
 
     try {
-      await _player.pause();
+      await _player.pause().timeout(const Duration(milliseconds: 800), onTimeout: () {});
     } catch (_) {}
 
     try {
-      await _player.setAudioSource(
-        _sourceForTrack(track),
-        initialPosition: Duration.zero,
-      );
+      await _player
+          .setAudioSource(_sourceForTrack(track), initialPosition: Duration.zero)
+          .timeout(const Duration(seconds: 3), onTimeout: () {
+        throw TimeoutException('setAudioSource timeout');
+      });
 
       if (autoplay) {
         await activateSession();
-        await _player.play();
+        await _player.play().timeout(const Duration(seconds: 2), onTimeout: () {});
       }
 
       await setVolume(_volume01);
       await setRate(_rate);
       return;
-    } catch (_) {
+    } catch (e) {
+      // ---------------------------
+      // 3) Fallback на MediaKit: ТОЛЬКО Windows.
+      // На iOS/Android — нельзя, иначе "Cannot find Mpv.framework/Mpv".
+      // ---------------------------
+      if (!_allowMediaKit) {
+        rethrow;
+      }
+
       _useMediaKit = true;
       await _ensureMediaKit();
 
@@ -2083,7 +2106,7 @@ class _PlaybackDeck {
         await activateSession();
       }
 
-      await mkp.open(_mediaForTrack(track), play: autoplay);
+      await mkp.open(_mediaForTrack(track), play: autoplay).timeout(const Duration(seconds: 3), onTimeout: () {});
       await setVolume(_volume01);
       await setRate(_rate);
       await setHighPassHz(_highPassHz);
@@ -2091,6 +2114,8 @@ class _PlaybackDeck {
   }
 
   Future<void> play() async {
+    if (!_allowMediaKit && _useMediaKit) _useMediaKit = false;
+
     const timeout = Duration(seconds: 2);
     try {
       if (_useMediaKit) {
@@ -2104,6 +2129,8 @@ class _PlaybackDeck {
   }
 
   Future<void> pause() async {
+    if (!_allowMediaKit && _useMediaKit) _useMediaKit = false;
+
     const timeout = Duration(seconds: 1);
     try {
       if (_useMediaKit) {
@@ -2117,6 +2144,8 @@ class _PlaybackDeck {
   }
 
   Future<void> seek(Duration position) async {
+    if (!_allowMediaKit && _useMediaKit) _useMediaKit = false;
+
     const timeout = Duration(seconds: 2);
     try {
       if (_useMediaKit) {
@@ -2130,42 +2159,62 @@ class _PlaybackDeck {
   }
 
   Future<void> setRepeatOne(bool enabled) async {
-    if (_useMediaKit) {
-      await _mkPlayer?.setPlaylistMode(enabled ? mk.PlaylistMode.single : mk.PlaylistMode.none);
-    } else {
-      await _player.setLoopMode(enabled ? LoopMode.one : LoopMode.off);
+    if (!_allowMediaKit && _useMediaKit) _useMediaKit = false;
+
+    try {
+      if (_useMediaKit) {
+        await _mkPlayer?.setPlaylistMode(enabled ? mk.PlaylistMode.single : mk.PlaylistMode.none);
+      } else {
+        await _player.setLoopMode(enabled ? LoopMode.one : LoopMode.off);
+      }
+    } catch (e) {
+      debugPrint('Deck setRepeatOne failed: $e');
     }
   }
 
   Future<void> setVolume(double volume01) async {
+    if (!_allowMediaKit && _useMediaKit) _useMediaKit = false;
+
     final clamped = volume01.clamp(0.0, 1.0);
     _volume01 = clamped;
 
     if ((_lastSentVolume01 - clamped).abs() < 0.01) return;
     _lastSentVolume01 = clamped;
 
-    if (_useMediaKit) {
-      await _mkPlayer?.setVolume(clamped * 100.0);
-    } else {
-      await _player.setVolume(clamped);
+    try {
+      if (_useMediaKit) {
+        await _mkPlayer?.setVolume(clamped * 100.0);
+      } else {
+        await _player.setVolume(clamped);
+      }
+    } catch (e) {
+      debugPrint('Deck setVolume failed: $e');
     }
   }
 
   Future<void> setRate(double rate) async {
+    if (!_allowMediaKit && _useMediaKit) _useMediaKit = false;
+
     final clamped = rate.clamp(0.5, 2.0);
     _rate = clamped;
 
     if ((_lastSentRate - clamped).abs() < 0.001) return;
     _lastSentRate = clamped;
 
-    if (_useMediaKit) {
-      await _mkPlayer?.setRate(clamped);
-    } else {
-      await _player.setSpeed(clamped);
+    try {
+      if (_useMediaKit) {
+        await _mkPlayer?.setRate(clamped);
+      } else {
+        await _player.setSpeed(clamped);
+      }
+    } catch (e) {
+      debugPrint('Deck setRate failed: $e');
     }
   }
 
   Future<void> setHighPassHz(double? hz) async {
+    if (!_allowMediaKit && _useMediaKit) _useMediaKit = false;
+
     final clamped = hz?.clamp(0.0, 500.0);
     _highPassHz = clamped;
 
@@ -2173,6 +2222,7 @@ class _PlaybackDeck {
     if ((_lastSentHighPassHz - sent).abs() < 1.0) return;
     _lastSentHighPassHz = sent;
 
+    // Эффект есть только на MediaKit (Windows). На just_audio просто выходим.
     if (!_useMediaKit) return;
 
     final player = _mkPlayer;
@@ -2194,12 +2244,18 @@ class _PlaybackDeck {
 
   void dispose() {
     for (final sub in _subscriptions) {
-      sub.cancel();
+      try {
+        sub.cancel();
+      } catch (_) {}
     }
     _subscriptions.clear();
 
-    _mkPlayer?.dispose();
-    _player.dispose();
+    try {
+      _mkPlayer?.dispose();
+    } catch (_) {}
+    try {
+      _player.dispose();
+    } catch (_) {}
   }
 }
 
