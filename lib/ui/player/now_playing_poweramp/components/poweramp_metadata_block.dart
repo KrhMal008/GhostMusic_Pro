@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
 
-/// Poweramp-style metadata block (left-aligned title and subtitle).
+/// Poweramp-style metadata block with LEFT alignment.
 ///
-/// Layout matches reference:
-/// - Title: large, bold-ish, white
-/// - Subtitle: smaller, lower contrast (artist - album)
+/// Title and subtitle are left-aligned to match the artwork card's left edge.
 class PowerampMetadataBlock extends StatelessWidget {
   final String title;
   final String? artist;
@@ -30,15 +28,17 @@ class PowerampMetadataBlock extends StatelessWidget {
     final subtitle = parts.isEmpty ? null : parts.join(' - ');
 
     return Padding(
+      // Same horizontal padding as artwork (24px) for left alignment
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start, // LEFT ALIGNED
         children: [
-          // Title
+          // Title - large, bold
           Text(
             title,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.left,
             style: const TextStyle(
               fontSize: 22,
               fontWeight: FontWeight.w700,
@@ -50,11 +50,12 @@ class PowerampMetadataBlock extends StatelessWidget {
 
           if (subtitle != null) ...[
             const SizedBox(height: 6),
-            // Subtitle (artist - album)
+            // Subtitle - smaller, muted
             Text(
               subtitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.left,
               style: TextStyle(
                 fontSize: 15,
                 fontWeight: FontWeight.w500,
