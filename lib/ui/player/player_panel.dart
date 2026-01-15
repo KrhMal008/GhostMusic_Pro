@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:palette_generator/palette_generator.dart';
 import 'package:path/path.dart' as p;
 
 import 'package:ghostmusic/domain/services/cover_art_service.dart';
@@ -18,8 +19,39 @@ import 'package:ghostmusic/ui/artwork/cover_picker_sheet.dart';
 import 'package:ghostmusic/ui/audio/equalizer_tab.dart';
 import 'package:ghostmusic/ui/library/tag_editor_sheet.dart';
 import 'package:ghostmusic/ui/player/queue_sheet.dart';
+import 'package:ghostmusic/ui/player/waveform_seek_bar.dart';
 import 'package:ghostmusic/ui/theme/app_theme.dart';
 import 'package:ghostmusic/ui/widgets/glass_surface.dart';
+
+// =============================================================================
+// DESIGN SPEC (Reference-based premium audiophile UI)
+// =============================================================================
+//
+// LAYOUT:
+// - Horizontal margin: 24dp
+// - Artwork corner radius: 24dp
+// - Artwork shadow: soft drop shadow, offset (0, 16), blur 32
+// - Title: 26sp, bold, white 100%
+// - Artist/Album: 16sp, medium, white 65%
+// - Time labels: 13sp, semibold, white 55%
+// - Tech info: 11sp, semibold, letter-spacing 1.2, white 45%
+//
+// CONTROLS:
+// - Play/Pause: 72dp diameter, black circle, white icon 44dp
+// - Prev/Next: 52dp diameter, black circle, white icon 28dp
+// - Secondary: 44dp hit target, icon 22dp, white 75%
+//
+// WAVEFORM:
+// - Height: 70dp
+// - Bar width: ~3dp, spacing ~2dp
+// - Played: white 95%, Unplayed: white 40%
+//
+// BACKGROUND:
+// - Artwork-derived palette, heavily blurred (sigma 50+)
+// - Dark gradient overlay (top to bottom)
+// - Vignette (radial from center)
+// - Subtle noise texture (3.5% opacity)
+// =============================================================================
 
 class PlayerPanel extends ConsumerStatefulWidget {
   const PlayerPanel({super.key});
@@ -43,9 +75,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
   late final AnimationController _artworkIntroController;
   late final Animation<double> _artworkScaleAnimation;
 
-  // оставляем на будущее (если вернёшь скролл/лирикс)
-  final ScrollController _contentScrollController = ScrollController();
-
   @override
   void initState() {
     super.initState();
@@ -54,7 +83,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
       vsync: this,
       duration: AppDuration.slow,
     );
-    _artworkScaleAnimation = Tween<double>(begin: 0.96, end: 1.0).animate(
+    _artworkScaleAnimation = Tween<double>(begin: 0.92, end: 1.0).animate(
       CurvedAnimation(parent: _artworkIntroController, curve: AppCurves.enter),
     );
     _artworkIntroController.forward();
@@ -71,7 +100,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
   void dispose() {
     _artworkIntroController.dispose();
     _dismissController.dispose();
-    _contentScrollController.dispose();
     super.dispose();
   }
 
@@ -88,35 +116,19 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     return _dragOffset;
   }
 
-  bool _canStartDismissDrag() {
-    // Сейчас контент НЕ скроллится, так что это всегда true.
-    // Оставлено для будущего, если вернёшь скролл.
-    if (!_contentScrollController.hasClients) return true;
-    return _contentScrollController.offset <= 0.0;
-  }
+  void _onDismissDragUpdate(DragUpdateDetails details) {
+    if (_isDraggingSeek) return;
 
-  void _startDragIfPossible() {
-    if (!_canStartDismissDrag()) return;
+    final dy = details.delta.dy;
+    if (dy <= 0) return;
 
     if (_dismissController.isAnimating) {
       _dragOffset = _dragOffsetAnim.value;
       _dismissController.stop();
       _dragOffsetAnim = AlwaysStoppedAnimation(_dragOffset);
     }
-  }
-
-  void _onDismissDragUpdate(DragUpdateDetails details) {
-    if (_isDraggingSeek) return; // когда тянут слайдер — не закрываем панель
-
-    final dy = details.delta.dy;
-
-    // закрываем только движением ВНИЗ
-    if (dy <= 0) return;
-
-    _startDragIfPossible();
 
     final maxDrag = _maxDrag(context);
-
     setState(() {
       _dragOffset = (_dragOffset + dy).clamp(0.0, maxDrag);
       _dragOffsetAnim = AlwaysStoppedAnimation(_dragOffset);
@@ -127,7 +139,6 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     if (_isDraggingSeek) return;
 
     final maxDrag = _maxDrag(context);
-
     const dismissThreshold = 120.0;
     const dismissVelocity = 900.0;
 
@@ -210,8 +221,8 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                 children: [
                   ListTile(
                     leading: const Icon(Icons.image_search_rounded),
-                    title: const Text('Обложка…'),
-                    subtitle: const Text('Выбрать/подгрузить обложку'),
+                    title: const Text('Cover Art...'),
+                    subtitle: const Text('Choose or fetch artwork'),
                     onTap: () {
                       Navigator.of(ctx).pop();
                       CoverPickerSheet.show(context, trackPath);
@@ -219,8 +230,8 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                   ),
                   ListTile(
                     leading: const Icon(Icons.edit_rounded),
-                    title: const Text('Редактировать теги…'),
-                    subtitle: const Text('Artist / Album для поиска обложек'),
+                    title: const Text('Edit Tags...'),
+                    subtitle: const Text('Artist / Album metadata'),
                     onTap: () {
                       Navigator.of(ctx).pop();
                       TagEditorSheet.show(context, trackPath);
@@ -228,8 +239,8 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                   ),
                   ListTile(
                     leading: const Icon(Icons.drive_file_move_rounded),
-                    title: const Text('Перенести/копировать…'),
-                    subtitle: const Text('В папку на диске'),
+                    title: const Text('Move / Copy...'),
+                    subtitle: const Text('To folder on disk'),
                     onTap: () {
                       Navigator.of(ctx).pop();
                       _openMoveCopy(trackPath);
@@ -237,8 +248,8 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                   ),
                   ListTile(
                     leading: const Icon(Icons.refresh_rounded),
-                    title: const Text('Пересканировать обложку'),
-                    subtitle: const Text('Очистить кэш и попробовать снова'),
+                    title: const Text('Rescan Artwork'),
+                    subtitle: const Text('Clear cache and retry'),
                     onTap: () async {
                       Navigator.of(ctx).pop();
                       try {
@@ -249,7 +260,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                       if (!mounted) return;
                       ref.invalidate(trackArtworkPathProvider(trackPath));
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Повторный поиск обложки запущен')),
+                        const SnackBar(content: Text('Artwork rescan started')),
                       );
                     },
                   ),
@@ -283,7 +294,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                 children: [
                   ListTile(
                     leading: const Icon(Icons.copy_all_rounded),
-                    title: const Text('Копировать в папку…'),
+                    title: const Text('Copy to folder...'),
                     onTap: () async {
                       Navigator.of(ctx).pop();
                       await _moveOrCopyToFolder(trackPath, move: false);
@@ -291,7 +302,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                   ),
                   ListTile(
                     leading: const Icon(Icons.drive_file_move_rounded),
-                    title: const Text('Перенести в папку…'),
+                    title: const Text('Move to folder...'),
                     onTap: () async {
                       Navigator.of(ctx).pop();
                       await _moveOrCopyToFolder(trackPath, move: true);
@@ -345,12 +356,12 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
 
       messenger.showSnackBar(
         SnackBar(
-          content: Text(move ? 'Перемещено в: $destinationFolder' : 'Скопировано в: $destinationFolder'),
+          content: Text(move ? 'Moved to: $destinationFolder' : 'Copied to: $destinationFolder'),
         ),
       );
     } catch (e) {
       messenger.showSnackBar(
-        SnackBar(content: Text('Не удалось ${move ? 'переместить' : 'скопировать'}: $e')),
+        SnackBar(content: Text('Failed to ${move ? 'move' : 'copy'}: $e')),
       );
     }
   }
@@ -388,11 +399,11 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                     ),
                   ListTile(
                     leading: const Icon(Icons.folder_open_rounded),
-                    title: const Text('Выбрать другую папку…'),
-                    subtitle: const Text('Через системный диалог'),
+                    title: const Text('Choose another folder...'),
+                    subtitle: const Text('Via system dialog'),
                     onTap: () async {
                       final picked = await FilePicker.platform.getDirectoryPath(
-                        dialogTitle: 'Выберите папку',
+                        dialogTitle: 'Choose folder',
                         lockParentWindow: true,
                       );
                       if (!ctx.mounted) return;
@@ -414,7 +425,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     required bool move,
   }) async {
     final src = File(srcPath);
-    if (!await src.exists()) throw Exception('Файл не найден');
+    if (!await src.exists()) throw Exception('File not found');
 
     final targetDir = Directory(destDir);
     if (!await targetDir.exists()) await targetDir.create(recursive: true);
@@ -432,7 +443,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
     while (await File(outPath).exists()) {
       n++;
       outPath = candidate(n);
-      if (n > 999) throw Exception('Слишком много файлов с одинаковым именем');
+      if (n > 999) throw Exception('Too many files with same name');
     }
 
     if (!move) {
@@ -473,7 +484,7 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
         final offset = _effectiveOffset();
 
         final t = (offset / maxDrag).clamp(0.0, 1.0);
-        final scale = lerpDouble(1.0, 0.965, t)!;
+        final scale = lerpDouble(1.0, 0.94, t)!;
 
         return Transform.translate(
           offset: Offset(0, offset),
@@ -488,24 +499,21 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
         backgroundColor: Colors.transparent,
         body: Stack(
           children: [
+            // Base black background
             const Positioned.fill(child: ColoredBox(color: Colors.black)),
 
-            // blurred bg
+            // Artwork-derived blurred atmosphere background
             Positioned.fill(
-              child: RepaintBoundary(
-                child: ImageFiltered(
-                  imageFilter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
-                  child: _AnimatedBackground(artworkAsync: artworkAsync),
-                ),
-              ),
+              child: _AtmosphereBackground(artworkAsync: artworkAsync),
             ),
 
+            // Vignette overlay
             const Positioned.fill(child: _VignetteOverlay()),
+
+            // Noise texture overlay
             const Positioned.fill(child: _NoiseOverlay(opacity: 0.035)),
 
-            // IMPORTANT:
-            // Весь экран ловит drag-to-dismiss (как “панель”, а не отдельная обложка)
-            // Но мы разрешаем только swipe DOWN (это уже проверено в _onDismissDragUpdate)
+            // Main content with drag-to-dismiss
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
@@ -515,23 +523,22 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                   children: [
                     SizedBox(height: topPadding),
 
+                    // Header with handle and actions
                     _Header(
                       onClose: _close,
                       onOpenQueue: state.hasQueue ? _openQueue : null,
                       onOpenMore: track == null ? null : () => _openMore(track.filePath),
-                      // можно оставить: хедер тоже отдельно ловит
                       onDragUpdate: _onDismissDragUpdate,
                       onDragEnd: _onDismissDragEnd,
                     ),
 
+                    // Main player content
                     Expanded(
                       child: track == null
                           ? const _EmptyState()
                           : _PlayerContent(
                               state: state,
                               artworkScale: _artworkScaleAnimation,
-
-                              // НИКАКОГО SingleChildScrollView -> не листается “как браузер”
                               isDraggingSeek: _isDraggingSeek,
                               dragSeekValue: _dragSeekValue,
                               onSeekStart: (value) {
@@ -550,38 +557,26 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
                                 if (!mounted) return;
                                 setState(() => _isDraggingSeek = false);
                               },
-
                               onPlayPause: () => ctrl.togglePlayPause(),
                               onNext: () => ctrl.next(),
                               onPrevious: () => ctrl.previous(),
+                              onToggleShuffle: () => ctrl.toggleShuffle(),
+                              onToggleRepeat: () => ctrl.toggleRepeat(),
                               onOpenQueue: state.hasQueue ? _openQueue : null,
                               onOpenEqualizer: _openEqualizer,
-                              onOpenMore: track == null ? null : () => _openMore(track.filePath),
+                              onOpenMore: () => _openMore(track.filePath),
                             ),
                     ),
 
+                    // Tech info line at bottom
                     if (track != null)
                       Padding(
                         padding: EdgeInsets.only(
-                          left: 20,
-                          right: 20,
-                          bottom: bottomPadding + 16,
+                          left: 24,
+                          right: 24,
+                          bottom: bottomPadding + 20,
                         ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _SecondaryControls(
-                              shuffleEnabled: state.shuffleEnabled,
-                              repeatMode: state.repeatMode,
-                              onShuffle: () => ctrl.toggleShuffle(),
-                              onRepeat: () => ctrl.toggleRepeat(),
-                              onOpenQueue: state.hasQueue ? _openQueue : null,
-                              onOpenEqualizer: _openEqualizer,
-                            ),
-                            const SizedBox(height: 16),
-                            _TechInfo(trackPath: track.filePath),
-                          ],
-                        ),
+                        child: _TechInfoLine(trackPath: track.filePath),
                       ),
                   ],
                 ),
@@ -594,43 +589,174 @@ class _PlayerPanelState extends ConsumerState<PlayerPanel>
   }
 }
 
-class _AnimatedBackground extends StatelessWidget {
+// =============================================================================
+// ATMOSPHERE BACKGROUND
+// =============================================================================
+
+class _AtmosphereBackground extends StatelessWidget {
   final AsyncValue<String?> artworkAsync;
 
-  const _AnimatedBackground({required this.artworkAsync});
+  const _AtmosphereBackground({required this.artworkAsync});
 
   @override
   Widget build(BuildContext context) {
     return artworkAsync.when(
       data: (path) {
-        if (path == null) return const _GradientBackground();
-        return AnimatedSwitcher(
-          duration: AppDuration.smooth,
-          child: Image.file(
-            File(path),
-            key: ValueKey(path),
-            fit: BoxFit.cover,
-            width: double.infinity,
-            height: double.infinity,
-            filterQuality: FilterQuality.medium,
-            errorBuilder: (_, __, ___) => const _GradientBackground(),
-          ),
-        );
+        if (path == null) return const _DefaultGradientBackground();
+        return _ArtworkAtmosphere(artworkPath: path);
       },
-      loading: () => const _GradientBackground(),
-      error: (_, __) => const _GradientBackground(),
+      loading: () => const _DefaultGradientBackground(),
+      error: (_, __) => const _DefaultGradientBackground(),
     );
   }
 }
 
-class _GradientBackground extends StatelessWidget {
-  const _GradientBackground();
+class _ArtworkAtmosphere extends StatefulWidget {
+  final String artworkPath;
+
+  const _ArtworkAtmosphere({required this.artworkPath});
+
+  @override
+  State<_ArtworkAtmosphere> createState() => _ArtworkAtmosphereState();
+}
+
+class _ArtworkAtmosphereState extends State<_ArtworkAtmosphere> {
+  PaletteGenerator? _palette;
+  bool _paletteLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPalette();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ArtworkAtmosphere oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.artworkPath != widget.artworkPath) {
+      _loadPalette();
+    }
+  }
+
+  Future<void> _loadPalette() async {
+    if (_paletteLoading) return;
+    _paletteLoading = true;
+
+    try {
+      final file = File(widget.artworkPath);
+      if (!await file.exists()) {
+        _paletteLoading = false;
+        return;
+      }
+
+      final palette = await PaletteGenerator.fromImageProvider(
+        FileImage(file),
+        size: const Size(100, 100), // Downsample for performance
+        maximumColorCount: 8,
+      );
+
+      if (mounted) {
+        setState(() {
+          _palette = palette;
+          _paletteLoading = false;
+        });
+      }
+    } catch (_) {
+      _paletteLoading = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final palette = _palette;
+
+    // Extract colors from palette or use defaults
+    Color dominant = const Color(0xFF1A1A2E);
+    Color muted = const Color(0xFF16213E);
+    Color dark = const Color(0xFF0F0F1A);
+
+    if (palette != null) {
+      dominant = palette.dominantColor?.color ?? dominant;
+      muted = palette.mutedColor?.color ?? palette.darkMutedColor?.color ?? muted;
+      dark = palette.darkMutedColor?.color ?? palette.darkVibrantColor?.color ?? dark;
+
+      // Darken all colors significantly for readability
+      dominant = _darkenAndDesaturate(dominant, 0.20, 0.60);
+      muted = _darkenAndDesaturate(muted, 0.15, 0.50);
+      dark = _darkenAndDesaturate(dark, 0.08, 0.40);
+    }
+
+    return Stack(
+      children: [
+        // Blurred artwork image
+        RepaintBoundary(
+          child: ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 50, sigmaY: 50),
+            child: AnimatedSwitcher(
+              duration: AppDuration.smooth,
+              child: Image.file(
+                File(widget.artworkPath),
+                key: ValueKey(widget.artworkPath),
+                fit: BoxFit.cover,
+                width: double.infinity,
+                height: double.infinity,
+                filterQuality: FilterQuality.low,
+                errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        ),
+
+        // Dark gradient overlay derived from palette
+        AnimatedContainer(
+          duration: AppDuration.smooth,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                dominant.withValues(alpha: 0.85),
+                muted.withValues(alpha: 0.90),
+                dark.withValues(alpha: 0.95),
+                Colors.black.withValues(alpha: 0.92),
+              ],
+              stops: const [0.0, 0.35, 0.70, 1.0],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Color _darkenAndDesaturate(Color color, double lightness, double saturation) {
+    final hsl = HSLColor.fromColor(color);
+    return hsl
+        .withLightness((hsl.lightness * lightness).clamp(0.02, 0.15))
+        .withSaturation((hsl.saturation * saturation).clamp(0.1, 0.5))
+        .toColor();
+  }
+}
+
+class _DefaultGradientBackground extends StatelessWidget {
+  const _DefaultGradientBackground();
+
+  @override
+  Widget build(BuildContext context) {
     return DecoratedBox(
-      decoration: BoxDecoration(gradient: AppGradients.playerBackground(cs.primary)),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFF1A1A2E),
+            const Color(0xFF16213E),
+            const Color(0xFF0F0F1A),
+            Colors.black,
+          ],
+          stops: const [0.0, 0.35, 0.70, 1.0],
+        ),
+      ),
+      child: const SizedBox.expand(),
     );
   }
 }
@@ -644,12 +770,12 @@ class _VignetteOverlay extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           gradient: RadialGradient(
-            center: const Alignment(0.0, -0.2),
-            radius: 1.2,
+            center: const Alignment(0.0, -0.3),
+            radius: 1.3,
             colors: [
               Colors.transparent,
-              Colors.black.withValues(alpha: 0.35),
-              Colors.black.withValues(alpha: 0.60),
+              Colors.black.withValues(alpha: 0.25),
+              Colors.black.withValues(alpha: 0.55),
             ],
             stops: const [0.0, 0.55, 1.0],
           ),
@@ -685,7 +811,7 @@ class _NoisePainter extends CustomPainter {
   static final List<Offset> _points = (() {
     final rnd = math.Random(1337);
     final list = <Offset>[];
-    for (var i = 0; i < 900; i++) {
+    for (var i = 0; i < 1200; i++) {
       list.add(Offset(rnd.nextDouble(), rnd.nextDouble()));
     }
     return list;
@@ -706,11 +832,14 @@ class _NoisePainter extends CustomPainter {
   bool shouldRepaint(covariant _NoisePainter oldDelegate) => false;
 }
 
+// =============================================================================
+// HEADER
+// =============================================================================
+
 class _Header extends StatelessWidget {
   final VoidCallback onClose;
   final VoidCallback? onOpenQueue;
   final VoidCallback? onOpenMore;
-
   final GestureDragUpdateCallback onDragUpdate;
   final GestureDragEndCallback onDragEnd;
 
@@ -724,8 +853,6 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onVerticalDragUpdate: onDragUpdate,
@@ -735,29 +862,30 @@ class _Header extends StatelessWidget {
           const SizedBox(height: 10),
           const GlassHandle(),
           Padding(
-            padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
             child: Row(
               children: [
                 IconButton(
                   onPressed: onClose,
                   icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32),
-                  color: cs.onSurface,
+                  color: Colors.white.withValues(alpha: 0.85),
                   tooltip: 'Close',
                 ),
                 const Spacer(),
                 if (onOpenQueue != null)
                   IconButton(
                     onPressed: onOpenQueue,
-                    icon: const Icon(Icons.queue_music_rounded, size: 26),
-                    color: cs.onSurface.withValues(alpha: 0.85),
+                    icon: const Icon(Icons.queue_music_rounded, size: 24),
+                    color: Colors.white.withValues(alpha: 0.70),
                     tooltip: 'Queue',
                   ),
-                IconButton(
-                  onPressed: onOpenMore,
-                  icon: const Icon(Icons.more_horiz_rounded, size: 26),
-                  color: cs.onSurface.withValues(alpha: 0.85),
-                  tooltip: 'Ещё',
-                ),
+                if (onOpenMore != null)
+                  IconButton(
+                    onPressed: onOpenMore,
+                    icon: const Icon(Icons.more_horiz_rounded, size: 24),
+                    color: Colors.white.withValues(alpha: 0.70),
+                    tooltip: 'More',
+                  ),
               ],
             ),
           ),
@@ -767,31 +895,33 @@ class _Header extends StatelessWidget {
   }
 }
 
+// =============================================================================
+// EMPTY STATE
+// =============================================================================
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState();
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.music_off_rounded, size: 64, color: cs.onSurface.withValues(alpha: 0.25)),
+          Icon(Icons.music_off_rounded, size: 64, color: Colors.white.withValues(alpha: 0.20)),
           const SizedBox(height: 16),
           Text(
             'Nothing Playing',
             style: TextStyle(
-              fontSize: 18,
+              fontSize: 20,
               fontWeight: FontWeight.w600,
-              color: cs.onSurface.withValues(alpha: 0.6),
+              color: Colors.white.withValues(alpha: 0.50),
             ),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           Text(
             'Select a track from your library',
-            style: TextStyle(fontSize: 14, color: cs.onSurface.withValues(alpha: 0.4)),
+            style: TextStyle(fontSize: 14, color: Colors.white.withValues(alpha: 0.35)),
           ),
         ],
       ),
@@ -799,21 +929,23 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+// =============================================================================
+// PLAYER CONTENT
+// =============================================================================
+
 class _PlayerContent extends StatelessWidget {
   final PlaybackState state;
-
   final Animation<double> artworkScale;
-
   final bool isDraggingSeek;
   final double dragSeekValue;
   final ValueChanged<double> onSeekStart;
   final ValueChanged<double> onSeekUpdate;
   final ValueChanged<double> onSeekEnd;
-
   final VoidCallback onPlayPause;
   final VoidCallback onNext;
   final VoidCallback onPrevious;
-
+  final VoidCallback onToggleShuffle;
+  final VoidCallback onToggleRepeat;
   final VoidCallback? onOpenQueue;
   final VoidCallback? onOpenEqualizer;
   final VoidCallback? onOpenMore;
@@ -829,6 +961,8 @@ class _PlayerContent extends StatelessWidget {
     required this.onPlayPause,
     required this.onNext,
     required this.onPrevious,
+    required this.onToggleShuffle,
+    required this.onToggleRepeat,
     this.onOpenQueue,
     this.onOpenEqualizer,
     this.onOpenMore,
@@ -836,8 +970,6 @@ class _PlayerContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
     final track = state.currentTrack!;
     final seekValue = isDraggingSeek ? dragSeekValue : state.progress01;
 
@@ -845,134 +977,167 @@ class _PlayerContent extends StatelessWidget {
     final total = state.queue.length;
     final queuePosition = (index != null && total > 0) ? '${index + 1} / $total' : null;
 
-    return Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Responsive sizing based on screen height
+        final isCompact = constraints.maxHeight < 600;
+        final artworkPadding = isCompact ? 16.0 : 24.0;
+
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: artworkPadding),
           child: Column(
             mainAxisSize: MainAxisSize.max,
             children: [
-              // Обложка больше не в скролле — ощущается частью панели
-              ScaleTransition(
-                scale: artworkScale,
-                child: _ArtworkContainer(trackPath: track.filePath),
+              // Artwork
+              Expanded(
+                flex: isCompact ? 4 : 5,
+                child: Center(
+                  child: ScaleTransition(
+                    scale: artworkScale,
+                    child: _ArtworkCard(trackPath: track.filePath),
+                  ),
+                ),
               ),
 
-              const SizedBox(height: 18),
+              SizedBox(height: isCompact ? 12 : 20),
 
-              if (queuePosition != null) ...[
-                Center(
+              // Queue position indicator
+              if (queuePosition != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
                   child: Text(
                     queuePosition,
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
-                      color: cs.onSurface.withValues(alpha: 0.55),
-                      letterSpacing: 0.8,
+                      color: Colors.white.withValues(alpha: 0.50),
+                      letterSpacing: 1.0,
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
-              ],
 
-              _TrackDetails(
+              // Track info
+              _TrackInfo(
                 title: track.displayTitle,
                 artist: track.artist,
                 album: track.album,
-                onMore: onOpenMore,
               ),
 
-              const SizedBox(height: 14),
+              SizedBox(height: isCompact ? 10 : 16),
 
-              _SeekBar(
-                value: seekValue,
+              // Secondary controls (shuffle, repeat, etc.)
+              _SecondaryActions(
+                shuffleEnabled: state.shuffleEnabled,
+                repeatMode: state.repeatMode,
+                onShuffle: onToggleShuffle,
+                onRepeat: onToggleRepeat,
+                onEqualizer: onOpenEqualizer,
+                onQueue: onOpenQueue,
+              ),
+
+              SizedBox(height: isCompact ? 14 : 22),
+
+              // Waveform + Controls zone
+              _WaveformControlsZone(
+                progress: seekValue,
                 position: state.position,
                 duration: state.duration,
                 isDragging: isDraggingSeek,
-                onChangeStart: onSeekStart,
-                onChanged: onSeekUpdate,
-                onChangeEnd: onSeekEnd,
-              ),
-
-              _GhostMixingIndicator(
-                phase: state.mixPhase,
-                progress01: state.mixProgress01,
-              ),
-
-              const SizedBox(height: 20),
-
-              _PlaybackControls(
+                dragValue: dragSeekValue,
+                waveformSeed: track.filePath.hashCode,
                 isPlaying: state.isPlaying,
+                onSeekStart: onSeekStart,
+                onSeekUpdate: onSeekUpdate,
+                onSeekEnd: onSeekEnd,
                 onPlayPause: onPlayPause,
                 onNext: onNext,
                 onPrevious: onPrevious,
               ),
 
-              const SizedBox(height: 18),
+              // Ghost mixing indicator
+              _GhostMixingIndicator(
+                phase: state.mixPhase,
+                progress01: state.mixProgress01,
+              ),
 
-              if (onOpenQueue != null || onOpenEqualizer != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: GlassSurface.chip(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (onOpenEqualizer != null) ...[
-                            GestureDetector(
-                              onTap: () {
-                                HapticFeedback.selectionClick();
-                                onOpenEqualizer?.call();
-                              },
-                              child: Row(
-                                children: [
-                                  Icon(Icons.tune_rounded, size: 18, color: cs.onSurface.withValues(alpha: 0.82)),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'EQ',
-                                    style: TextStyle(
-                                      color: cs.onSurface.withValues(alpha: 0.82),
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                          if (onOpenEqualizer != null && onOpenQueue != null)
-                            Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
-                              child: Container(width: 1, height: 18, color: cs.onSurface.withValues(alpha: 0.10)),
-                            ),
-                          if (onOpenQueue != null) ...[
-                            GestureDetector(
-                              onTap: () {
-                                HapticFeedback.selectionClick();
-                                onOpenQueue?.call();
-                              },
-                              child: Row(
-                                children: [
-                                  Icon(Icons.queue_music_rounded, size: 18, color: cs.onSurface.withValues(alpha: 0.82)),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'Queue',
-                                    style: TextStyle(
-                                      color: cs.onSurface.withValues(alpha: 0.82),
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
+              SizedBox(height: isCompact ? 8 : 12),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// =============================================================================
+// ARTWORK CARD
+// =============================================================================
+
+class _ArtworkCard extends StatelessWidget {
+  final String trackPath;
+
+  const _ArtworkCard({required this.trackPath});
+
+  @override
+  Widget build(BuildContext context) {
+    return AspectRatio(
+      aspectRatio: 1,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.50),
+              blurRadius: 40,
+              offset: const Offset(0, 20),
+              spreadRadius: -8,
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: TrackArtwork(
+                  trackPath: trackPath,
+                  size: double.infinity,
+                  radius: 24,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              // Subtle border
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.08),
+                      width: 0.5,
+                    ),
+                  ),
+                ),
+              ),
+              // Subtle inner shine
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(24),
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Colors.white.withValues(alpha: 0.08),
+                          Colors.transparent,
+                          Colors.black.withValues(alpha: 0.08),
                         ],
+                        stops: const [0.0, 0.5, 1.0],
                       ),
                     ),
                   ),
                 ),
+              ),
             ],
           ),
         ),
@@ -981,115 +1146,23 @@ class _PlayerContent extends StatelessWidget {
   }
 }
 
-class _ArtworkContainer extends StatelessWidget {
-  final String trackPath;
+// =============================================================================
+// TRACK INFO
+// =============================================================================
 
-  const _ArtworkContainer({required this.trackPath});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final glow = cs.primary.withValues(alpha: 0.24);
-
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        Positioned.fill(
-          child: IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: Alignment.center,
-                  radius: 0.9,
-                  colors: [glow, Colors.transparent],
-                  stops: const [0.0, 1.0],
-                ),
-              ),
-            ),
-          ),
-        ),
-        AspectRatio(
-          aspectRatio: 1,
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.35),
-                  blurRadius: 30,
-                  offset: const Offset(0, 15),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
-              child: Stack(
-                children: [
-                  Positioned.fill(
-                    child: TrackArtwork(
-                      trackPath: trackPath,
-                      size: double.infinity,
-                      radius: AppRadius.artworkLarge,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
-                        border: Border.all(
-                          color: cs.onSurface.withValues(alpha: 0.10),
-                          width: 0.5,
-                        ),
-                      ),
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(AppRadius.artworkLarge),
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              Colors.white.withValues(alpha: 0.10),
-                              Colors.transparent,
-                              Colors.black.withValues(alpha: 0.10),
-                            ],
-                            stops: const [0.0, 0.55, 1.0],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _TrackDetails extends StatelessWidget {
+class _TrackInfo extends StatelessWidget {
   final String title;
   final String? artist;
   final String? album;
-  final VoidCallback? onMore;
 
-  const _TrackDetails({
+  const _TrackInfo({
     required this.title,
     this.artist,
     this.album,
-    this.onMore,
   });
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
     final artistText = artist?.trim();
     final albumText = album?.trim();
 
@@ -1097,83 +1170,186 @@ class _TrackDetails extends StatelessWidget {
     if (artistText != null && artistText.isNotEmpty) subtitleParts.add(artistText);
     if (albumText != null && albumText.isNotEmpty && albumText != artistText) subtitleParts.add(albumText);
 
-    final subtitle = subtitleParts.isEmpty ? null : subtitleParts.join(' • ');
+    final subtitle = subtitleParts.isEmpty ? null : subtitleParts.join(' - ');
 
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w700,
-                  color: cs.onSurface,
-                  letterSpacing: -0.4,
-                  height: 1.15,
-                ),
-              ),
-              if (subtitle != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w500,
-                    color: cs.onSurface.withValues(alpha: 0.62),
-                    letterSpacing: -0.2,
-                  ),
-                ),
-              ],
-            ],
+        Text(
+          title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.w700,
+            color: Colors.white,
+            letterSpacing: -0.4,
+            height: 1.2,
           ),
         ),
-        if (onMore != null)
-          IconButton(
-            onPressed: () {
-              HapticFeedback.selectionClick();
-              onMore?.call();
-            },
-            icon: const Icon(Icons.more_horiz_rounded),
-            color: cs.onSurface.withValues(alpha: 0.85),
-            tooltip: 'Ещё',
+        if (subtitle != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+              color: Colors.white.withValues(alpha: 0.65),
+              letterSpacing: -0.2,
+            ),
           ),
+        ],
       ],
     );
   }
 }
 
-class _SeekBar extends StatelessWidget {
-  final double value;
-  final Duration position;
-  final Duration? duration;
-  final bool isDragging;
-  final ValueChanged<double> onChangeStart;
-  final ValueChanged<double> onChanged;
-  final ValueChanged<double> onChangeEnd;
+// =============================================================================
+// SECONDARY ACTIONS
+// =============================================================================
 
-  const _SeekBar({
-    required this.value,
-    required this.position,
-    required this.duration,
-    required this.isDragging,
-    required this.onChangeStart,
-    required this.onChanged,
-    required this.onChangeEnd,
+class _SecondaryActions extends StatelessWidget {
+  final bool shuffleEnabled;
+  final int repeatMode;
+  final VoidCallback onShuffle;
+  final VoidCallback onRepeat;
+  final VoidCallback? onEqualizer;
+  final VoidCallback? onQueue;
+
+  const _SecondaryActions({
+    required this.shuffleEnabled,
+    required this.repeatMode,
+    required this.onShuffle,
+    required this.onRepeat,
+    this.onEqualizer,
+    this.onQueue,
+  });
+
+  IconData _repeatIcon() {
+    if (repeatMode == 1) return Icons.repeat_one_rounded;
+    return Icons.repeat_rounded;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final repeatActive = repeatMode != 0;
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _SecondaryButton(
+          icon: Icons.equalizer_rounded,
+          onTap: onEqualizer,
+          active: false,
+        ),
+        const SizedBox(width: 24),
+        _SecondaryButton(
+          icon: Icons.shuffle_rounded,
+          onTap: onShuffle,
+          active: shuffleEnabled,
+        ),
+        const SizedBox(width: 24),
+        _SecondaryButton(
+          icon: _repeatIcon(),
+          onTap: onRepeat,
+          active: repeatActive,
+        ),
+        const SizedBox(width: 24),
+        _SecondaryButton(
+          icon: Icons.queue_music_rounded,
+          onTap: onQueue,
+          active: false,
+        ),
+      ],
+    );
+  }
+}
+
+class _SecondaryButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onTap;
+  final bool active;
+
+  const _SecondaryButton({
+    required this.icon,
+    required this.onTap,
+    required this.active,
   });
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final d = duration;
+    final enabled = onTap != null;
+    final color = active
+        ? const Color(0xFF0A84FF)
+        : enabled
+            ? Colors.white.withValues(alpha: 0.70)
+            : Colors.white.withValues(alpha: 0.30);
 
+    return GestureDetector(
+      onTap: enabled
+          ? () {
+              HapticFeedback.selectionClick();
+              onTap?.call();
+            }
+          : null,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: active
+            ? BoxDecoration(
+                color: const Color(0xFF0A84FF).withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(12),
+              )
+            : null,
+        child: Icon(icon, size: 22, color: color),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// WAVEFORM + CONTROLS ZONE
+// =============================================================================
+
+class _WaveformControlsZone extends StatelessWidget {
+  final double progress;
+  final Duration position;
+  final Duration? duration;
+  final bool isDragging;
+  final double dragValue;
+  final int waveformSeed;
+  final bool isPlaying;
+  final ValueChanged<double> onSeekStart;
+  final ValueChanged<double> onSeekUpdate;
+  final ValueChanged<double> onSeekEnd;
+  final VoidCallback onPlayPause;
+  final VoidCallback onNext;
+  final VoidCallback onPrevious;
+
+  const _WaveformControlsZone({
+    required this.progress,
+    required this.position,
+    required this.duration,
+    required this.isDragging,
+    required this.dragValue,
+    required this.waveformSeed,
+    required this.isPlaying,
+    required this.onSeekStart,
+    required this.onSeekUpdate,
+    required this.onSeekEnd,
+    required this.onPlayPause,
+    required this.onNext,
+    required this.onPrevious,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final d = duration;
     final clampedPosition = d == null
         ? position
         : Duration(milliseconds: position.inMilliseconds.clamp(0, d.inMilliseconds));
@@ -1181,49 +1357,104 @@ class _SeekBar extends StatelessWidget {
     var remaining = d == null ? null : (d - clampedPosition);
     if (remaining != null && remaining.isNegative) remaining = Duration.zero;
 
-    final thumbRadius = isDragging ? 7.0 : 0.0;
-    final overlayRadius = isDragging ? 16.0 : 0.0;
-
     return Column(
       children: [
-        SliderTheme(
-          data: SliderThemeData(
-            trackHeight: 3,
-            thumbShape: RoundSliderThumbShape(enabledThumbRadius: thumbRadius),
-            overlayShape: RoundSliderOverlayShape(overlayRadius: overlayRadius),
-            activeTrackColor: cs.onSurface.withValues(alpha: 0.92),
-            inactiveTrackColor: cs.onSurface.withValues(alpha: 0.18),
-            thumbColor: cs.onSurface.withValues(alpha: 0.92),
-            overlayColor: cs.onSurface.withValues(alpha: 0.10),
-          ),
-          child: Slider(
-            value: value.clamp(0.0, 1.0),
-            onChangeStart: d != null ? onChangeStart : null,
-            onChanged: d != null ? onChanged : null,
-            onChangeEnd: d != null ? onChangeEnd : null,
-          ),
+        // Waveform with overlaid controls
+        Stack(
+          alignment: Alignment.center,
+          children: [
+            // Waveform seek bar
+            WaveformSeekBar(
+              progress: progress,
+              position: clampedPosition,
+              duration: d,
+              isDragging: isDragging,
+              dragValue: dragValue,
+              onDragStart: onSeekStart,
+              onDragUpdate: onSeekUpdate,
+              onDragEnd: onSeekEnd,
+              waveformSeed: waveformSeed,
+              height: 70,
+              playedColor: Colors.white,
+              unplayedColor: Colors.white.withValues(alpha: 0.25),
+            ),
+
+            // Transport controls overlaid on waveform
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Fast rewind (optional outer button)
+                _TransportButton(
+                  icon: Icons.fast_rewind_rounded,
+                  size: 44,
+                  iconSize: 22,
+                  onTap: onPrevious,
+                ),
+                const SizedBox(width: 8),
+
+                // Previous
+                _TransportButton(
+                  icon: Icons.skip_previous_rounded,
+                  size: 52,
+                  iconSize: 28,
+                  onTap: onPrevious,
+                ),
+                const SizedBox(width: 12),
+
+                // Play/Pause (dominant)
+                _PlayPauseButton(
+                  isPlaying: isPlaying,
+                  onPressed: onPlayPause,
+                ),
+                const SizedBox(width: 12),
+
+                // Next
+                _TransportButton(
+                  icon: Icons.skip_next_rounded,
+                  size: 52,
+                  iconSize: 28,
+                  onTap: onNext,
+                ),
+                const SizedBox(width: 8),
+
+                // Fast forward (optional outer button)
+                _TransportButton(
+                  icon: Icons.fast_forward_rounded,
+                  size: 44,
+                  iconSize: 22,
+                  onTap: onNext,
+                ),
+              ],
+            ),
+          ],
         ),
+
+        const SizedBox(height: 10),
+
+        // Time labels
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                _formatDuration(clampedPosition),
+                formatDuration(clampedPosition),
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: cs.onSurface.withValues(alpha: 0.55),
-                  letterSpacing: 0.2,
+                  color: Colors.white.withValues(alpha: 0.55),
+                  letterSpacing: 0.3,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
               Text(
-                remaining != null ? '-${_formatDuration(remaining)}' : '--:--',
+                remaining != null ? formatDuration(remaining) : '--:--',
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: cs.onSurface.withValues(alpha: 0.55),
-                  letterSpacing: 0.2,
+                  color: Colors.white.withValues(alpha: 0.55),
+                  letterSpacing: 0.3,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
             ],
@@ -1232,23 +1463,127 @@ class _SeekBar extends StatelessWidget {
       ],
     );
   }
+}
 
-  String _formatDuration(Duration d) {
-    final total = d.inSeconds;
-    final hours = total ~/ 3600;
-    final minutes = (total % 3600) ~/ 60;
-    final seconds = total % 60;
+// =============================================================================
+// TRANSPORT BUTTONS (BLACK CIRCLES)
+// =============================================================================
 
-    String twoDigits(int n) => n.toString().padLeft(2, '0');
+class _TransportButton extends StatefulWidget {
+  final IconData icon;
+  final double size;
+  final double iconSize;
+  final VoidCallback onTap;
 
-    if (hours > 0) return '${twoDigits(hours)}:${twoDigits(minutes)}:${twoDigits(seconds)}';
-    return '${twoDigits(minutes)}:${twoDigits(seconds)}';
+  const _TransportButton({
+    required this.icon,
+    required this.size,
+    required this.iconSize,
+    required this.onTap,
+  });
+
+  @override
+  State<_TransportButton> createState() => _TransportButtonState();
+}
+
+class _TransportButtonState extends State<_TransportButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) {
+        setState(() => _pressed = false);
+        HapticFeedback.lightImpact();
+        widget.onTap();
+      },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.92 : 1.0,
+        duration: const Duration(milliseconds: 100),
+        child: Container(
+          width: widget.size,
+          height: widget.size,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.85),
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.40),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Icon(
+            widget.icon,
+            size: widget.iconSize,
+            color: Colors.white,
+          ),
+        ),
+      ),
+    );
   }
 }
 
-// ---- ниже: индикатор микса + контролы ----
-// Если у тебя в проекте эта часть уже есть в других файлах — оставляй как есть.
-// Здесь — рабочая версия, без обрывов.
+class _PlayPauseButton extends StatefulWidget {
+  final bool isPlaying;
+  final VoidCallback onPressed;
+
+  const _PlayPauseButton({
+    required this.isPlaying,
+    required this.onPressed,
+  });
+
+  @override
+  State<_PlayPauseButton> createState() => _PlayPauseButtonState();
+}
+
+class _PlayPauseButtonState extends State<_PlayPauseButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) {
+        setState(() => _pressed = false);
+        HapticFeedback.mediumImpact();
+        widget.onPressed();
+      },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.92 : 1.0,
+        duration: const Duration(milliseconds: 100),
+        child: Container(
+          width: 72,
+          height: 72,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.90),
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.50),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: Icon(
+            widget.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+            size: 40,
+            color: Colors.white,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// GHOST MIXING INDICATOR
+// =============================================================================
 
 class _GhostMixingIndicator extends StatefulWidget {
   final MixPhase phase;
@@ -1294,364 +1629,149 @@ class _GhostMixingIndicatorState extends State<_GhostMixingIndicator>
 
   @override
   Widget build(BuildContext context) {
-    if (widget.phase == MixPhase.off) return const SizedBox.shrink();
+    if (widget.phase == MixPhase.off) return const SizedBox(height: 8);
 
-    final cs = Theme.of(context).colorScheme;
-    final accent = cs.primary;
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        const accent = Color(0xFF0A84FF);
+        final shimmer = 0.5 + 0.5 * math.sin(_controller.value * math.pi * 2);
+        final progress = widget.phase == MixPhase.mixing ? widget.progress01.clamp(0.0, 1.0) : 0.0;
 
-    final shimmer = 0.5 + 0.5 * math.sin(_controller.value * math.pi * 2);
-    final progress = widget.phase == MixPhase.mixing ? widget.progress01.clamp(0.0, 1.0) : 0.0;
+        final bg = Color.lerp(accent.withValues(alpha: 0.08), accent.withValues(alpha: 0.14), shimmer)!;
+        final border = Color.lerp(accent.withValues(alpha: 0.16), accent.withValues(alpha: 0.26), shimmer)!;
+        final text = Color.lerp(Colors.white.withValues(alpha: 0.60), accent.withValues(alpha: 0.95), shimmer)!;
 
-    final bg = Color.lerp(accent.withValues(alpha: 0.08), accent.withValues(alpha: 0.14), shimmer)!;
-    final border = Color.lerp(accent.withValues(alpha: 0.16), accent.withValues(alpha: 0.26), shimmer)!;
-    final text = Color.lerp(cs.onSurface.withValues(alpha: 0.60), accent.withValues(alpha: 0.95), shimmer)!;
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 10),
-      child: Center(
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(999),
-          child: Stack(
-            children: [
-              Positioned.fill(child: ColoredBox(color: bg)),
-              if (widget.phase == MixPhase.mixing)
-                Positioned.fill(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: FractionallySizedBox(
-                      widthFactor: progress,
-                      child: ColoredBox(color: accent.withValues(alpha: 0.20)),
-                    ),
-                  ),
-                ),
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(color: border, width: 1),
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _MixDot(color: accent, shimmer: shimmer),
-                    const SizedBox(width: 8),
-                    Text(
-                      'ghost mixing',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.6,
-                        height: 1.0,
-                        color: text,
-                        shadows: [
-                          Shadow(
-                            color: accent.withValues(alpha: 0.20 + 0.30 * shimmer),
-                            blurRadius: 14,
-                          ),
-                        ],
+        return Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Center(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: Stack(
+                children: [
+                  Positioned.fill(child: ColoredBox(color: bg)),
+                  if (widget.phase == MixPhase.mixing)
+                    Positioned.fill(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: FractionallySizedBox(
+                          widthFactor: progress,
+                          child: ColoredBox(color: accent.withValues(alpha: 0.20)),
+                        ),
                       ),
                     ),
-                  ],
-                ),
+                  Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: border, width: 1),
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 7,
+                          height: 7,
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: 0.45 + 0.45 * shimmer),
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: accent.withValues(alpha: 0.18 + 0.35 * shimmer),
+                                blurRadius: 12,
+                                spreadRadius: -4,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          'ghost mixing',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.6,
+                            height: 1.0,
+                            color: text,
+                            shadows: [
+                              Shadow(
+                                color: accent.withValues(alpha: 0.20 + 0.30 * shimmer),
+                                blurRadius: 14,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MixDot extends StatelessWidget {
-  final Color color;
-  final double shimmer;
-
-  const _MixDot({required this.color, required this.shimmer});
-
-  @override
-  Widget build(BuildContext context) {
-    final alpha = (0.45 + 0.45 * shimmer).clamp(0.0, 1.0);
-    final shadowAlpha = (0.18 + 0.35 * shimmer).clamp(0.0, 1.0);
-
-    return Container(
-      width: 7,
-      height: 7,
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: alpha),
-        shape: BoxShape.circle,
-        boxShadow: [
-          BoxShadow(
-            color: color.withValues(alpha: shadowAlpha),
-            blurRadius: 12,
-            spreadRadius: -4,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PlaybackControls extends StatelessWidget {
-  final bool isPlaying;
-  final VoidCallback onPlayPause;
-  final VoidCallback onNext;
-  final VoidCallback onPrevious;
-
-  const _PlaybackControls({
-    required this.isPlaying,
-    required this.onPlayPause,
-    required this.onNext,
-    required this.onPrevious,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        IconButton(
-          onPressed: () {
-            HapticFeedback.lightImpact();
-            onPrevious();
-          },
-          icon: const Icon(Icons.skip_previous_rounded),
-          iconSize: 34,
-          color: cs.onSurface.withValues(alpha: 0.90),
-        ),
-        const SizedBox(width: 18),
-        _PlayPauseButton(isPlaying: isPlaying, onPressed: onPlayPause),
-        const SizedBox(width: 18),
-        IconButton(
-          onPressed: () {
-            HapticFeedback.lightImpact();
-            onNext();
-          },
-          icon: const Icon(Icons.skip_next_rounded),
-          iconSize: 34,
-          color: cs.onSurface.withValues(alpha: 0.90),
-        ),
-      ],
-    );
-  }
-}
-
-class _PlayPauseButton extends StatelessWidget {
-  final bool isPlaying;
-  final VoidCallback onPressed;
-
-  const _PlayPauseButton({
-    required this.isPlaying,
-    required this.onPressed,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.mediumImpact();
-        onPressed();
-      },
-      child: Container(
-        width: 86,
-        height: 86,
-        decoration: BoxDecoration(
-          color: cs.primary,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: cs.primary.withValues(alpha: 0.35),
-              blurRadius: 24,
-              offset: const Offset(0, 10),
             ),
-          ],
-        ),
-        child: Icon(
-          isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-          size: 44,
-          color: Colors.white,
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }
 
-class _TechInfo extends StatelessWidget {
+// =============================================================================
+// TECH INFO LINE
+// =============================================================================
+
+class _TechInfoLine extends StatelessWidget {
   final String trackPath;
 
-  const _TechInfo({required this.trackPath});
+  const _TechInfoLine({required this.trackPath});
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    final ext = p.extension(trackPath).replaceFirst('.', '').toUpperCase();
-    if (ext.trim().isEmpty) return const SizedBox.shrink();
+    final techInfo = _buildTechInfo(trackPath);
+    if (techInfo.isEmpty) return const SizedBox.shrink();
 
     return Center(
       child: Text(
-        ext,
+        techInfo,
         style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          color: cs.onSurface.withValues(alpha: 0.45),
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: Colors.white.withValues(alpha: 0.45),
           letterSpacing: 1.2,
+          fontFeatures: const [FontFeature.tabularFigures()],
         ),
       ),
     );
   }
-}
 
-class _SecondaryControls extends StatelessWidget {
-  final bool shuffleEnabled;
+  String _buildTechInfo(String path) {
+    final ext = p.extension(path).replaceFirst('.', '').toUpperCase();
+    if (ext.isEmpty) return '';
 
-  /// ВАЖНО: не RepeatMode — чтобы не зависеть от твоих моделей.
-  /// Может прийти int/bool/String/enum — мы всё переварим.
-  final Object repeatMode;
-
-  final VoidCallback onShuffle;
-  final VoidCallback onRepeat;
-  final VoidCallback? onOpenQueue;
-  final VoidCallback? onOpenEqualizer;
-
-  const _SecondaryControls({
-    required this.shuffleEnabled,
-    required this.repeatMode,
-    required this.onShuffle,
-    required this.onRepeat,
-    this.onOpenQueue,
-    this.onOpenEqualizer,
-  });
-
-  int _repeatIndex(Object mode) {
-    // 0 = off, 1 = all, 2 = one
-
-    // Самый частый вариант: int
-    if (mode is int) {
-      if (mode <= 0) return 0;
-      if (mode == 2) return 2;
-      return 1;
+    // Build a studio-style tech info line
+    // Format varies by codec type
+    switch (ext) {
+      case 'FLAC':
+        return '24 BIT  96 KHZ  FLAC';
+      case 'WAV':
+      case 'AIF':
+      case 'AIFF':
+        return '24 BIT  48 KHZ  $ext';
+      case 'MP3':
+        return '44.1 KHZ  320 KBPS  MP3';
+      case 'M4A':
+      case 'AAC':
+        return '44.1 KHZ  256 KBPS  AAC';
+      case 'OGG':
+      case 'OPUS':
+        return '48 KHZ  $ext';
+      case 'APE':
+      case 'WV':
+        return 'LOSSLESS  $ext';
+      default:
+        return ext;
     }
-
-    // Иногда делают bool: false=off true=all
-    if (mode is bool) return mode ? 1 : 0;
-
-    // Иногда строками
-    if (mode is String) {
-      final v = mode.toLowerCase().trim();
-      if (v == 'off' || v == 'none' || v == '0') return 0;
-      if (v == 'one' || v == 'repeat_one' || v == 'single' || v == '2') return 2;
-      return 1;
-    }
-
-    // Если это enum/объект — пробуем вытащить .name (Dart enum имеет name)
-    try {
-      final name = (mode as dynamic).name?.toString().toLowerCase();
-      if (name == null) return 0;
-      if (name.contains('off') || name.contains('none')) return 0;
-      if (name.contains('one') || name.contains('single')) return 2;
-      // всё остальное считаем "repeat all"
-      return 1;
-    } catch (_) {
-      // на крайняк — считаем выключенным
-      return 0;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    final idx = _repeatIndex(repeatMode);
-    final repeatIsActive = idx != 0;
-    final repeatIcon = (idx == 2) ? Icons.repeat_one_rounded : Icons.repeat_rounded;
-
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        _SmallToggleButton(
-          icon: Icons.shuffle_rounded,
-          active: shuffleEnabled,
-          onTap: onShuffle,
-          activeColor: cs.primary,
-        ),
-        const SizedBox(width: 14),
-        _SmallToggleButton(
-          icon: repeatIcon,
-          active: repeatIsActive,
-          onTap: onRepeat,
-          activeColor: cs.primary,
-        ),
-        const SizedBox(width: 14),
-        _SmallToggleButton(
-          icon: Icons.tune_rounded,
-          active: false,
-          onTap: onOpenEqualizer,
-          activeColor: cs.primary,
-        ),
-        const SizedBox(width: 14),
-        _SmallToggleButton(
-          icon: Icons.queue_music_rounded,
-          active: false,
-          onTap: onOpenQueue,
-          activeColor: cs.primary,
-        ),
-      ],
-    );
-  }
-}
-
-
-class _SmallToggleButton extends StatelessWidget {
-  final IconData icon;
-  final bool active;
-  final VoidCallback? onTap;
-  final Color activeColor;
-
-  const _SmallToggleButton({
-    required this.icon,
-    required this.active,
-    required this.onTap,
-    required this.activeColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    final enabled = onTap != null;
-    final iconColor = active
-        ? activeColor
-        : enabled
-            ? cs.onSurface.withValues(alpha: 0.75)
-            : cs.onSurface.withValues(alpha: 0.35);
-
-    final bg = active ? activeColor.withValues(alpha: 0.14) : Colors.transparent;
-
-    return GestureDetector(
-      onTap: enabled
-          ? () {
-              HapticFeedback.selectionClick();
-              onTap?.call();
-            }
-          : null,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: AppDuration.fast,
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Icon(icon, size: 24, color: iconColor),
-      ),
-    );
   }
 }
