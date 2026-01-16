@@ -1,31 +1,37 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-/// Poweramp-style utility row with icons: Visualizer, Sleep, Repeat, Shuffle.
+import '../state/sleep_timer_controller.dart';
+
+/// Poweramp-style utility row with icons:
+/// - Queue (replaces Visualizer)
+/// - Sleep Timer
+/// - Repeat
+/// - Shuffle
 ///
-/// Behaviors:
-/// - Tap cycles through modes
-/// - Long press opens mode selection menu
+/// Layout: [Queue] [Sleep] ... [Repeat] [Shuffle]
 class PowerampUtilityRow extends StatelessWidget {
   final bool shuffleEnabled;
   final int repeatMode; // 0=off, 1=one, 2=all
+  final SleepTimerController sleepTimerController;
   final VoidCallback onShuffleTap;
   final VoidCallback onRepeatTap;
+  final VoidCallback onQueueTap;
+  final VoidCallback onSleepTap;
   final VoidCallback? onShuffleLongPress;
   final VoidCallback? onRepeatLongPress;
-  final VoidCallback? onVisualizerTap;
-  final VoidCallback? onSleepTap;
 
   const PowerampUtilityRow({
     super.key,
     required this.shuffleEnabled,
     required this.repeatMode,
+    required this.sleepTimerController,
     required this.onShuffleTap,
     required this.onRepeatTap,
+    required this.onQueueTap,
+    required this.onSleepTap,
     this.onShuffleLongPress,
     this.onRepeatLongPress,
-    this.onVisualizerTap,
-    this.onSleepTap,
   });
 
   @override
@@ -35,21 +41,27 @@ class PowerampUtilityRow extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Left side: Visualizer, Sleep
+          // Left side: Queue, Sleep Timer
           Row(
             children: [
+              // Queue button (replaces Visualizer)
               _UtilityButton(
-                icon: Icons.equalizer_rounded,
+                icon: Icons.queue_music_rounded,
                 isActive: false,
-                onTap: onVisualizerTap,
-                tooltip: 'Visualizer',
+                onTap: onQueueTap,
+                tooltip: 'Queue',
               ),
               const SizedBox(width: 20),
-              _UtilityButton(
-                icon: Icons.timer_outlined,
-                isActive: false,
-                onTap: onSleepTap,
-                tooltip: 'Sleep Timer',
+              // Sleep Timer button
+              ListenableBuilder(
+                listenable: sleepTimerController,
+                builder: (context, _) {
+                  return _SleepTimerButton(
+                    isActive: sleepTimerController.isActive,
+                    remainingFormatted: sleepTimerController.remainingFormatted,
+                    onTap: onSleepTap,
+                  );
+                },
               ),
             ],
           ),
@@ -62,7 +74,7 @@ class PowerampUtilityRow extends StatelessWidget {
                 isActive: repeatMode != 0,
                 onTap: onRepeatTap,
                 onLongPress: onRepeatLongPress,
-                tooltip: 'Repeat',
+                tooltip: _repeatTooltip(),
               ),
               const SizedBox(width: 20),
               _UtilityButton(
@@ -81,6 +93,15 @@ class PowerampUtilityRow extends StatelessWidget {
 
   IconData _repeatIcon() {
     return repeatMode == 1 ? Icons.repeat_one_rounded : Icons.repeat_rounded;
+  }
+
+  String _repeatTooltip() {
+    return switch (repeatMode) {
+      0 => 'Repeat Off',
+      1 => 'Repeat One',
+      2 => 'Repeat All',
+      _ => 'Repeat',
+    };
   }
 }
 
@@ -142,6 +163,85 @@ class _UtilityButtonState extends State<_UtilityButton> {
               widget.icon,
               size: 22,
               color: color,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Sleep timer button with optional remaining time badge
+class _SleepTimerButton extends StatefulWidget {
+  final bool isActive;
+  final String remainingFormatted;
+  final VoidCallback onTap;
+
+  const _SleepTimerButton({
+    required this.isActive,
+    required this.remainingFormatted,
+    required this.onTap,
+  });
+
+  @override
+  State<_SleepTimerButton> createState() => _SleepTimerButtonState();
+}
+
+class _SleepTimerButtonState extends State<_SleepTimerButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = widget.isActive
+        ? const Color(0xFF4FC3F7)
+        : Colors.white.withValues(alpha: 0.55);
+
+    return Tooltip(
+      message: widget.isActive
+          ? 'Sleep Timer: ${widget.remainingFormatted}'
+          : 'Sleep Timer',
+      child: GestureDetector(
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) {
+          setState(() => _pressed = false);
+          HapticFeedback.selectionClick();
+          widget.onTap();
+        },
+        onTapCancel: () => setState(() => _pressed = false),
+        child: AnimatedScale(
+          scale: _pressed ? 0.90 : 1.0,
+          duration: const Duration(milliseconds: 80),
+          child: Container(
+            height: 44,
+            padding: EdgeInsets.symmetric(horizontal: widget.isActive ? 10 : 0),
+            constraints: const BoxConstraints(minWidth: 44),
+            decoration: widget.isActive
+                ? BoxDecoration(
+                    color: const Color(0xFF4FC3F7).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  )
+                : null,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.timer_outlined,
+                  size: 22,
+                  color: color,
+                ),
+                if (widget.isActive && widget.remainingFormatted.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    widget.remainingFormatted,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ),

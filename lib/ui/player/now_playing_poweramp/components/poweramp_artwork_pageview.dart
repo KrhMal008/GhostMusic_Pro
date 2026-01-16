@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:ghostmusic/domain/state/playback_controller.dart';
 import '../native/airplay_route_picker.dart';
 
 /// Poweramp-style interactive artwork with PageView swipe.
