@@ -318,7 +318,8 @@ class _NowPlayingPowerampScreenState
                   child: Column(
                     children: [
                       // Swipe handle indicator (subtle)
-                      SizedBox(height: topPadding > 0 ? 8 : 16),
+                      // Extra padding for Dynamic Island (iPhone 14 Pro+)
+                      SizedBox(height: topPadding > 50 ? 12 : (topPadding > 0 ? 8 : 16)),
                       Center(
                         child: Container(
                           width: 36,
@@ -329,7 +330,7 @@ class _NowPlayingPowerampScreenState
                           ),
                         ),
                       ),
-                      const SizedBox(height: 16),
+                      SizedBox(height: topPadding > 50 ? 20 : 16),
 
                       // Main scrollable content
                       Expanded(
@@ -459,10 +460,13 @@ class _MainContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final track = state.currentTrack!;
+    final mq = MediaQuery.of(context);
+    final topPadding = mq.padding.top;
 
     return Column(
       children: [
-        const SizedBox(height: 8),
+        // Reduced top spacing since main screen handles Dynamic Island padding
+        SizedBox(height: topPadding > 50 ? 4 : 8),
 
         // Artwork with PageView swipe and overlays
         Center(

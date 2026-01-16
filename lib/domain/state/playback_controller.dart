@@ -335,6 +335,8 @@ class PlaybackController extends StateNotifier<PlaybackState> {
   // ===========================================================================
 
   bool _handlingCompletion = false;
+  DateTime? _lastCompletionTime;
+  static const _completionDebounceMs = 500; // Debounce rapid completion events
 
   final _AutomixTailAnalyzer _tailAnalyzer = _AutomixTailAnalyzer();
 
@@ -538,6 +540,16 @@ class PlaybackController extends StateNotifier<PlaybackState> {
   void _onDeckCompleted(_PlaybackDeck deck) {
     if (!identical(deck, _activeDeck)) return;
     if (state.mixPhase != MixPhase.off) return;
+    
+    // Debounce rapid completion events (prevents double-skip bug)
+    final now = DateTime.now();
+    final lastTime = _lastCompletionTime;
+    if (lastTime != null && now.difference(lastTime).inMilliseconds < _completionDebounceMs) {
+      debugPrint('Debounced duplicate completion event');
+      return;
+    }
+    _lastCompletionTime = now;
+    
     unawaited(_enqueue(() => _handleCompleted()));
   }
 
@@ -1218,6 +1230,9 @@ class PlaybackController extends StateNotifier<PlaybackState> {
       throw Exception(reason);
     }
 
+    // Reset completion debounce for new track
+    _lastCompletionTime = null;
+    
     await _abortAutomix();
 
     _plannedPlan = null;

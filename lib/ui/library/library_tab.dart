@@ -18,6 +18,7 @@ import 'package:ghostmusic/ui/artwork/folder_artwork.dart';
 import 'package:ghostmusic/ui/library/folder_browser.dart';
 import 'package:ghostmusic/ui/player/gesture_surface.dart';
 import 'package:ghostmusic/ui/player/now_playing_route.dart';
+import 'package:ghostmusic/ui/player/now_playing_poweramp/components/poweramp_track_menu.dart';
 import 'package:ghostmusic/ui/theme/app_theme.dart';
 import 'package:ghostmusic/ui/widgets/glass_app_bar.dart';
 import 'package:ghostmusic/ui/widgets/glass_surface.dart';
@@ -870,40 +871,7 @@ class LibraryTracksScreen extends ConsumerWidget {
                     ? Icon(Icons.equalizer_rounded, color: cs.favorite)
                     : Icon(Icons.more_horiz_rounded, color: cs.onSurface.withValues(alpha: 0.45)),
                 onTap: () => _playFromLibrary(context, ref, tracks, index),
-                onLongPress: () async {
-                  HapticFeedback.mediumImpact();
-
-                  await showModalBottomSheet<void>(
-                    context: context,
-                    showDragHandle: true,
-                    builder: (_) {
-                      return SafeArea(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            ListTile(
-                              leading: const Icon(Icons.play_arrow_rounded),
-                              title: const Text('Следующим'),
-                              onTap: () async {
-                                Navigator.of(context).pop();
-                                await ref.read(playbackControllerProvider.notifier).playNext(track);
-                              },
-                            ),
-                            ListTile(
-                              leading: const Icon(Icons.playlist_add_rounded),
-                              title: const Text('В конец очереди'),
-                              onTap: () async {
-                                Navigator.of(context).pop();
-                                await ref.read(playbackControllerProvider.notifier).addToQueueEnd(track);
-                              },
-                            ),
-                            const SizedBox(height: 8),
-                          ],
-                        ),
-                      );
-                    },
-                  );
-                },
+                onLongPress: () => PowerampTrackMenu.show(context, track.filePath),
               );
             },
           ),

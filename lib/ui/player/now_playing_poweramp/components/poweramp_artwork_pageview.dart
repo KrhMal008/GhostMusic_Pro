@@ -49,6 +49,9 @@ class _PowerampArtworkPageViewState extends ConsumerState<PowerampArtworkPageVie
   late PageController _pageController;
   int _currentPage = 0;
   bool _isAnimating = false;
+  
+  // Track which artwork paths have been precached to avoid redundant work
+  final Set<String> _precachedPaths = {};
 
   @override
   void initState() {
@@ -58,6 +61,11 @@ class _PowerampArtworkPageViewState extends ConsumerState<PowerampArtworkPageVie
       initialPage: widget.currentIndex,
       viewportFraction: 1.0,
     );
+    
+    // Precache adjacent artwork after first frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _precacheAdjacentArtwork(widget.currentIndex);
+    });
   }
 
   @override
@@ -67,6 +75,52 @@ class _PowerampArtworkPageViewState extends ConsumerState<PowerampArtworkPageVie
     // If track changed externally (e.g., from queue), animate to new page
     if (widget.currentIndex != _currentPage && !_isAnimating) {
       _animateToPage(widget.currentIndex);
+    }
+    
+    // Precache adjacent artwork when track changes
+    if (widget.currentIndex != oldWidget.currentIndex) {
+      _precacheAdjacentArtwork(widget.currentIndex);
+    }
+  }
+  
+  /// Precache prev/next artwork for smooth swiping
+  void _precacheAdjacentArtwork(int currentIndex) {
+    if (!mounted) return;
+    
+    final indicesToPrecache = <int>[
+      currentIndex - 1,
+      currentIndex + 1,
+      currentIndex - 2, // Extra buffer
+      currentIndex + 2,
+    ];
+    
+    for (final index in indicesToPrecache) {
+      if (index < 0 || index >= widget.queueLength) continue;
+      
+      final path = widget.getArtworkPath(index);
+      if (path == null) continue;
+      if (_precachedPaths.contains(path)) continue;
+      
+      _precachedPaths.add(path);
+      
+      // Precache the file image
+      final file = File(path);
+      if (file.existsSync()) {
+        precacheImage(
+          FileImage(file),
+          context,
+          onError: (_, __) {
+            // Ignore precache errors
+            _precachedPaths.remove(path);
+          },
+        );
+      }
+    }
+    
+    // Limit cache size to prevent memory bloat
+    if (_precachedPaths.length > 20) {
+      final toRemove = _precachedPaths.take(_precachedPaths.length - 10).toList();
+      _precachedPaths.removeAll(toRemove);
     }
   }
 
@@ -103,6 +157,9 @@ class _PowerampArtworkPageViewState extends ConsumerState<PowerampArtworkPageVie
     }
 
     _currentPage = page;
+    
+    // Precache artwork for newly visible adjacent tracks
+    _precacheAdjacentArtwork(page);
   }
 
   @override
@@ -110,9 +167,20 @@ class _PowerampArtworkPageViewState extends ConsumerState<PowerampArtworkPageVie
     final screenWidth = MediaQuery.sizeOf(context).width;
     final artworkSize = screenWidth - 48; // 24px margin each side
 
-    return SizedBox(
+    return Container(
       width: artworkSize,
       height: artworkSize,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.50),
+            blurRadius: 40,
+            offset: const Offset(0, 16),
+            spreadRadius: -8,
+          ),
+        ],
+      ),
       child: Stack(
         children: [
           // PageView for interactive swipe
@@ -130,25 +198,6 @@ class _PowerampArtworkPageViewState extends ConsumerState<PowerampArtworkPageVie
                   isCurrentPage: index == widget.currentIndex,
                 );
               },
-            ),
-          ),
-
-          // Shadow overlay for depth
-          Positioned.fill(
-            child: IgnorePointer(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.50),
-                      blurRadius: 40,
-                      offset: const Offset(0, 16),
-                      spreadRadius: -8,
-                    ),
-                  ],
-                ),
-              ),
             ),
           ),
 
